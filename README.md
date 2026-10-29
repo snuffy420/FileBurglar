@@ -1,23 +1,30 @@
-# File Burglar
-
-**Folder indexing, file activity tracking, and drive health for Windows.**
+<p align="center"><img src="assets/fileburglar.png" alt="File Burglar icon" width="112"></p>
+<h1 align="center">File Burglar</h1>
+<p align="center"><strong>Disk-space tracking and drive monitoring for Windows</strong></p>
+<p align="center">Live file activity · Indexed Explorer · Drive health and temperatures</p>
 
 File Burglar helps you see where disk space is going. It saves an index of your files and folders, watches for changes, and reports which folders are gaining or freeing space. Drive health and available temperature readings stay accessible from the system tray.
 
-**Current release:** 1.4.5 · **Platform:** Windows 10/11, x64 · **License:** GPL-3.0-or-later
+<p align="center">
+<a href="https://github.com/snuffy420/FileBurglar/releases/tag/v1.4.5">Download 1.4.5</a> ·
+<a href="#features">Features</a> ·
+<a href="CHANGELOG.md">Changelog</a>
+</p>
+
+**Version 1.4.5** · **Windows 10/11 x64** · **GPL-3.0-or-later** · Created by **snuffy420 / zerØ software**
 
 ![File Burglar main window](assets/screenshots/main.png)
 
-## Downloads
+## Download and install
 
 Get the [Windows release](https://github.com/snuffy420/FileBurglar/releases):
 
 | Package | Use |
 | --- | --- |
-| `FileBurglar-1.4.5-windows-x64-setup.exe` | Install with Start menu shortcuts and an uninstaller. |
-| `FileBurglar-1.4.5-windows-x64-portable.zip` | Extract the entire folder and run `FileBurglar.exe`. |
-| `FileBurglar-1.4.5-windows-x64-portable.7z` | The same portable folder with 7-Zip compression. |
-| `FileBurglar-1.4.5-source.zip` / `.7z` | Application source, assets, tests, and build scripts. |
+| [Windows x64 — installer](https://github.com/snuffy420/FileBurglar/releases/download/v1.4.5/FileBurglar-1.4.5-windows-x64-setup.exe) | Complete app, Start menu shortcuts, and an uninstaller. |
+| [Windows x64 — portable ZIP](https://github.com/snuffy420/FileBurglar/releases/download/v1.4.5/FileBurglar-1.4.5-windows-x64-portable.zip) | Extract the entire folder and run `FileBurglar.exe`. |
+| [Windows x64 — portable 7z](https://github.com/snuffy420/FileBurglar/releases/download/v1.4.5/FileBurglar-1.4.5-windows-x64-portable.7z) | The same portable folder with 7-Zip compression. |
+| Python source — [ZIP](https://github.com/snuffy420/FileBurglar/releases/download/v1.4.5/FileBurglar-1.4.5-source.zip) / [7z](https://github.com/snuffy420/FileBurglar/releases/download/v1.4.5/FileBurglar-1.4.5-source.7z) | Application source, assets, tests, and build scripts. |
 
 The installer and portable packages include Python and the required Qt runtime. **You do not need to install Python to use them.** Keep the executable and its `_internal` folder together. macOS, Linux, ARM64-native, and 32-bit builds are not provided in this release.
 
@@ -40,7 +47,6 @@ The installer and portable packages include Python and the required Qt runtime. 
 - Opt-in Windows logon startup, using an elevated task for the current user.
 - Dark styling with orange accents, a dark-to-orange main-window gradient, and a magnifier/burglar icon at multiple display sizes.
 - Local error details, retry controls, and bounded diagnostic logs.
-- About / Help / Donate tabs with version details, usage instructions, contact links, and an optional Bitcoin donation QR code.
 
 ![Indexed Explorer](assets/screenshots/explorer.png)
 
@@ -91,28 +97,18 @@ py -3.12 main.py
 
 `FileBurglar.cmd` also launches the source app without a console. See [building](docs/BUILDING.md) for reproducible packaging steps and [verification](docs/VERIFICATION.md) for what was tested.
 
-## Contact
-
-[![Contact File Burglar](assets/contact-button.svg)](https://snuffy420.github.io/FileBurglar/docs/contact.html)
-
-Use the contact form for questions, feedback, or bug reports. Include the application version, Windows version, and exact error text. [Contact-page publishing instructions](docs/CONTACT.md).
-
-## About, help, and donations
-
-Open **About** from the main window, or **About / Help / Donate** from the tray menu. The Help tab explains indexing versus live monitoring, reports, Explorer, data locations, pause controls, and error recovery.
-
-![About File Burglar](assets/screenshots/about.png)
-
-![In-app help](assets/screenshots/help.png)
-
-Donations are optional. The Donate BTC tab shows the same Bitcoin address used by the maintainer's other applications, with a scannable QR code and a copy-address button:
-
-`bc1qz8877p6vusc22qrctdj4h7w0uk2l9l9h8lwphy`
-
-![Optional Bitcoin donations](assets/screenshots/donate.png)
-
 ## License
 
 Application code and original File Burglar graphics: **GPL-3.0-or-later**. See [LICENSE](LICENSE). Bundled dependencies retain their own licenses; [third-party notices](THIRD_PARTY_NOTICES.md) and license texts are included.
 
 Maintained by [zerØ software / snuffy420](https://github.com/snuffy420).
+
+## Contact
+
+Questions, feedback, or a bug report? Get in touch through the File Burglar contact form, or open a [GitHub issue](https://github.com/snuffy420/FileBurglar/issues). Include your application version, Windows version, and steps to reproduce the problem.
+
+<p align="center">
+  <a href="https://snuffy420.github.io/FileBurglar/docs/contact.html">
+    <img src="assets/contact-button.svg" alt="Contact File Burglar" width="260">
+  </a>
+</p>
