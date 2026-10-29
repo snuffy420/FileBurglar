@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Contact File Burglar</title><meta name="description" content="Questions, feedback and bug reports for File Burglar.">
+<style>
+:root{color-scheme:dark;--bg:#101416;--panel:#171d20;--edge:#2b3538;--text:#e6eceb;--muted:#9eafad;--mint:#ff8a1f}
+*{box-sizing:border-box}body{margin:0;min-height:100vh;padding:38px 20px;background:radial-gradient(ellipse at 50% 0,#7a4a1255,transparent 60%),var(--bg);font:15px/1.6 system-ui,-apple-system,"Segoe UI",sans-serif;color:var(--text);display:grid;place-items:center}
+main{width:100%;max-width:590px;background:var(--panel);border:1px solid var(--edge);border-top:3px solid var(--mint);border-radius:18px;padding:30px;box-shadow:0 22px 70px #0005}.brand{display:flex;gap:14px;align-items:center}.brand svg{flex:none;width:52px;height:52px}h1{margin:0;font-size:27px;line-height:1.3;font-weight:650;letter-spacing:-.6px}.intro{color:var(--muted);margin:14px 0 24px}label{display:block;margin:15px 0 6px;color:#b7c6c3;font-weight:550;font-size:13px}input,select,textarea{width:100%;background:#101719;border:1px solid #354145;border-radius:8px;padding:12px 13px;color:var(--text);font:inherit;outline:none}input:focus,select:focus,textarea:focus{border-color:var(--mint);box-shadow:0 0 0 3px #ff8a1f18}textarea{resize:vertical;min-height:145px}button{width:100%;margin-top:20px;border:1px solid var(--mint);border-radius:8px;padding:12px;background:var(--mint);color:#211306;font:600 15px system-ui;cursor:pointer}button:hover{background:#ffb56f}button:focus-visible,a:focus-visible{outline:3px solid var(--mint);outline-offset:4px}button:disabled{opacity:.65;cursor:wait}.details,.footer{font-size:12px;color:var(--muted)}.details{margin:10px 0 0}.footer{margin:24px 0 0;padding-top:18px;border-top:1px solid var(--edge);display:flex;gap:12px;justify-content:space-between;flex-wrap:wrap}a{color:var(--mint);text-decoration:none}a:hover{text-decoration:underline}.notice{margin-top:16px;padding:12px;border-radius:8px}.success{background:#18352d;color:#ffb56f;border:1px solid #295445}.error{background:#352320;color:#f0b2a0;border:1px solid #6a4540}[hidden]{display:none!important}.trap{position:absolute;left:-9999px;width:1px;height:1px;overflow:hidden}@media(max-width:480px){body{padding:18px 12px}main{padding:22px 18px}h1{font-size:23px}}
+</style></head><body><main>
+<div class="brand"><img src="../assets/fileburglar.png" width="52" height="52" alt="File Burglar magnifier and masked burglar icon"><h1>Contact File Burglar</h1></div>
+<p class="intro">Have a question, feedback, or a bug to report? Send a message below.</p>
+<form id="contact-form" action="https://formspree.io/f/myeekrpy" method="POST">
+<input type="hidden" name="_subject" value="File Burglar contact">
+<div class="trap" aria-hidden="true"><label for="website">Leave this field empty</label><input id="website" name="_gotcha" type="text" tabindex="-1" autocomplete="off"></div>
+<label for="name">Name</label><input id="name" name="name" autocomplete="name" maxlength="120" required placeholder="Your name">
+<label for="email">Email</label><input id="email" name="email" type="email" autocomplete="email" maxlength="200" required placeholder="you@example.com">
+<label for="app-version">Application version</label><input id="app-version" name="app_version" value="1.4.5" maxlength="40" placeholder="Shown in About">
+<label for="topic">Topic</label><select id="topic" name="topic"><option>General question</option><option>Bug report</option><option>Feedback</option><option>About / Help / Donation question</option><option>Other</option></select>
+<label for="message">Message</label><textarea id="message" name="message" maxlength="5000" required placeholder="How can I help?"></textarea>
+<p class="details">For a bug report, include your File Burglar version (shown in About) and Windows version. This release supports Windows only. Messages are handled by <a href="https://formspree.io" target="_blank" rel="noopener">Formspree</a>.</p>
+<button id="send" type="submit">Send message</button>
+</form>
+<div id="success" class="notice success" role="status" aria-live="polite" hidden>Thanks — your message has been sent.</div>
+<div id="error" class="notice error" role="alert" hidden></div>
+<div class="footer"><span>zerØ software · <a href="https://github.com/snuffy420">snuffy420</a></span><a href="https://github.com/snuffy420/FileBurglar">Back to File Burglar ↗</a></div>
+</main><script>
+const form=document.querySelector('#contact-form'),send=document.querySelector('#send'),ok=document.querySelector('#success'),error=document.querySelector('#error');
+form.addEventListener('submit',async event=>{
+ event.preventDefault();if(!form.reportValidity())return;
+ ok.hidden=true;error.hidden=true;send.disabled=true;send.textContent='Sending…';
+ const controller=new AbortController(),timeout=setTimeout(()=>controller.abort(),20000);
+ try{
+  const response=await fetch(form.action,{method:'POST',body:new FormData(form),headers:{Accept:'application/json'},signal:controller.signal});
+  if(response.ok){form.reset();ok.hidden=false;}
+  else{error.textContent='Your message could not be sent. Please try again in a moment.';error.hidden=false;}
+ }catch(problem){error.textContent='Could not connect. Your message is still here; check your connection and try again.';error.hidden=false;}
+ finally{clearTimeout(timeout);send.disabled=false;send.textContent='Send message';}
+});
+</script></body></html>
