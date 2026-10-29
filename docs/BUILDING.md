@@ -21,7 +21,7 @@ $env:INNO_ISCC = 'C:\Program Files\Inno Setup 7\ISCC.exe'
 py -3.12 tools\package_release.py --payload dist\FileBurglar --output ..\GitHub-Upload
 ```
 
-The packaging script stages an explicit allowlist of source files, builds the installer, creates portable/source ZIP and 7z archives, validates each archive, writes checksums, and records a build manifest. It refuses to overwrite an existing release folder.
+The packaging script stages an explicit allowlist of source files, builds the installer, creates portable/source 7z archives, validates each archive, writes checksums, and records a build manifest. It refuses to overwrite an existing release folder.
 
 For release verification without monitoring any real drives:
 

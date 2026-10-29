@@ -23,8 +23,8 @@ File Burglar indexes your storage, monitors file activity, and makes it easier t
 ## Downloads
 
 - **Installer:** `FileBurglar-1.4.5-windows-x64-setup.exe`
-- **Portable:** `FileBurglar-1.4.5-windows-x64-portable.zip` or `.7z` — extract the entire folder, then run `FileBurglar.exe`.
-- **Source:** `FileBurglar-1.4.5-source.zip` or `.7z`.
+- **Portable:** `FileBurglar-1.4.5-windows-x64-portable.7z` — extract the entire folder, then run `FileBurglar.exe`.
+- **Source:** `FileBurglar-1.4.5-source.7z`.
 - **Checksums:** `SHA256SUMS.txt`, with individual `.sha256` files.
 
 No Python installation is needed for the installer or portable downloads. Administrator access is requested for drive monitoring/counters. Portable data stays in its `Data` folder; installed data stays in `%LOCALAPPDATA%\FileBurglar`.

@@ -22,9 +22,8 @@ Get the [Windows release](https://github.com/snuffy420/FileBurglar/releases):
 | Package | Use |
 | --- | --- |
 | [Windows x64 — installer](https://github.com/snuffy420/FileBurglar/releases/download/v1.4.5/FileBurglar-1.4.5-windows-x64-setup.exe) | Complete app, Start menu shortcuts, and an uninstaller. |
-| [Windows x64 — portable ZIP](https://github.com/snuffy420/FileBurglar/releases/download/v1.4.5/FileBurglar-1.4.5-windows-x64-portable.zip) | Extract the entire folder and run `FileBurglar.exe`. |
-| [Windows x64 — portable 7z](https://github.com/snuffy420/FileBurglar/releases/download/v1.4.5/FileBurglar-1.4.5-windows-x64-portable.7z) | The same portable folder with 7-Zip compression. |
-| Python source — [ZIP](https://github.com/snuffy420/FileBurglar/releases/download/v1.4.5/FileBurglar-1.4.5-source.zip) / [7z](https://github.com/snuffy420/FileBurglar/releases/download/v1.4.5/FileBurglar-1.4.5-source.7z) | Application source, assets, tests, and build scripts. |
+| [Windows x64 — portable 7z](https://github.com/snuffy420/FileBurglar/releases/download/v1.4.5/FileBurglar-1.4.5-windows-x64-portable.7z) | Extract the entire folder and run `FileBurglar.exe`. |
+| Python source — [7z](https://github.com/snuffy420/FileBurglar/releases/download/v1.4.5/FileBurglar-1.4.5-source.7z) | Application source, assets, tests, and build scripts. |
 
 The installer and portable packages include Python and the required Qt runtime. **You do not need to install Python to use them.** Keep the executable and its `_internal` folder together. macOS, Linux, ARM64-native, and 32-bit builds are not provided in this release.
 
@@ -51,6 +50,18 @@ The installer and portable packages include Python and the required Qt runtime. 
 ![Indexed Explorer](assets/screenshots/explorer.png)
 
 Screenshots use synthetic demonstration data, not a user's private file index.
+
+## System tray
+
+Keep File Burglar in the tray while you work. The main icon opens the app, and optional drive icons show temperatures using your configured cool, warm, and hot colors. Missing readings appear as dashes.
+
+![File Burglar tray icons with demo temperatures](assets/screenshots/system-tray.png)
+
+Right-click the main icon to open the window, pause monitoring, configure Windows startup, or quit. Right-click a drive-temperature icon to remove it from the tray; the drive remains monitored.
+
+<table><tr><td><img src="assets/screenshots/tray-menu.png" alt="Main system tray menu"></td><td><img src="assets/screenshots/tray-drive-menu.png" alt="Drive-temperature icon menu"></td></tr></table>
+
+These examples use the app's actual icon artwork and menus with synthetic readings. The icon strip is enlarged for readability; it is not a screenshot of a user's Windows taskbar.
 
 ## Getting started
 

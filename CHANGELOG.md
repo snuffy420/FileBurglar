@@ -49,7 +49,7 @@ Windows x64 release preparation, followed by 1.4.5 with the About section. Earli
 
 ### Release packages
 
-- Windows x64 installer and standalone portable folder, with ZIP and 7z portable archives.
-- Matching ZIP/7z source archives, dependency licenses, build scripts, and SHA-256 checksums.
+- Windows x64 installer and standalone portable folder, with 7z portable archives.
+- Matching 7z source archives, dependency licenses, build scripts, and SHA-256 checksums.
 - GitHub-ready README, synthetic screenshots, release notes, issue template, and File Burglar contact page using the existing maintainer Formspree endpoint.
 - Windows only for this release; no macOS/Linux packages.

@@ -92,6 +92,8 @@ def run():
                 app.processEvents();time.sleep(.01)
             assert explorer.table.rowCount()==2
             explorer.grab().save(str(assets/'screenshots/explorer.png'))
+            from render_tray_assets import render as render_tray
+            render_tray(app,window,assets)
     finally:
         if explorer:explorer.close()
         if window:

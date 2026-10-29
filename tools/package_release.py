@@ -10,7 +10,6 @@ import subprocess
 import sys
 import time
 import uuid
-import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -55,7 +54,7 @@ def copy_source(destination):
     (destination/'assets/screenshots').mkdir(parents=True)
     for name in ASSET_FILES:
         shutil.copy2(ROOT/'assets'/name,destination/'assets'/name)
-    for name in ('main.png','explorer.png','about.png','help.png','donate.png'):
+    for name in ('main.png','explorer.png','about.png','help.png','donate.png','system-tray.png','tray-menu.png','tray-drive-menu.png'):
         shutil.copy2(ROOT/'assets/screenshots'/name,destination/'assets/screenshots'/name)
     clean_files(destination)
     return destination
@@ -77,17 +76,6 @@ def compiler():
             path=Path(base)/f'Inno Setup {version}'/'ISCC.exe'
             if path.is_file():return path
     raise RuntimeError('Set INNO_ISCC to your Inno Setup ISCC.exe.')
-
-
-def zip_folder(folder,output):
-    with zipfile.ZipFile(output,'w',zipfile.ZIP_DEFLATED,compresslevel=6) as archive:
-        for path in sorted(folder.rglob('*')):
-            archive.write(path,str(Path(folder.name)/path.relative_to(folder)))
-    with zipfile.ZipFile(output) as archive:
-        assert archive.testzip() is None
-        actual={entry.filename for entry in archive.infolist() if not entry.is_dir()}
-        expected={f'{folder.name}/{p.relative_to(folder).as_posix()}' for p in clean_files(folder)}
-        assert actual==expected
 
 
 def archive_7z(folder,output):
@@ -139,14 +127,12 @@ def package(payload,output):
         installer=assets/f'FileBurglar-{APP_VERSION}-windows-x64-setup.exe'
         assert installer.is_file()
         print('Installer compiled',flush=True)
-        zip_folder(portable,assets/f'{portable.name}.zip')
         archive_7z(portable,assets/f'{portable.name}.7z')
         source_name=f'FileBurglar-{APP_VERSION}-source'
         source=scratch/source_name
         shutil.copytree(repo,source)
-        zip_folder(source,assets/f'{source_name}.zip')
         archive_7z(source,assets/f'{source_name}.7z')
-        files=sorted(p for p in assets.iterdir() if p.suffix in ('.exe','.zip','.7z'))
+        files=sorted(p for p in assets.iterdir() if p.suffix in ('.exe','.7z'))
         checks={p.name:digest(p) for p in files}
         for path in files:
             path.with_name(path.name+'.sha256').write_text(f'{checks[path.name]}  {path.name}\n',encoding='ascii')
