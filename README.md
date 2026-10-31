@@ -11,7 +11,10 @@ File Burglar helps you see where disk space is going. It saves an index of your 
 <a href="CHANGELOG.md">Changelog</a>
 </p>
 
-**Version 1.5.4** · **Windows 10/11 x64** · **GPL-3.0-or-later** · Created by **snuffy420 / zerØ software**
+<p align="center">
+<strong>Version 1.5.4</strong> · <strong>Windows 10/11 x64</strong> · <strong>GPL-3.0-or-later</strong><br>
+Created by <strong>snuffy420 / zerØ software</strong>
+</p>
 
 ![File Burglar main window](assets/screenshots/main.png)
 
