@@ -17,6 +17,9 @@ sys.path.insert(0,str(ROOT))
 from appinfo import APP_VERSION
 
 SOURCE_FILES = [
+    'volumes.py','test_volumes.py','test_disk_budget.py',
+    'devices.py','feature_ui.py','notifications.py','reports.py','updates.py','work_mode.py',
+    'test_features.py','test_feature_ui.py',
     'about_dialog.py','appinfo.py','diagnostics.py','engine.py','indexer.py','main.py','selftest.py',
     'settings.py','smart.py','startup.py','storage.py','ui.py','watcher.py','folder_updates.py',
     'test_fileburglar.py','test_explorer_gui.py','test_explorer_smart.py','test_release_support.py','test_monitoring.py','test_about.py',
@@ -24,7 +27,7 @@ SOURCE_FILES = [
     'README.md','CHANGELOG.md','LICENSE','THIRD_PARTY_NOTICES.md','.gitignore','.nojekyll']
 ASSET_FILES = ['fileburglar.ico','fileburglar.png','contact-button.svg',
                'installer-side.bmp','installer-small.bmp','donation-btc-qr.png']
-PRIVATE = {'settings.json','fileburglar.db','fileburglar.db-wal','fileburglar.db-shm'}
+PRIVATE = {'settings.json','notification-state.json','update-state.json','fileburglar.db','fileburglar.db-wal','fileburglar.db-shm'}
 
 
 def digest(path):
@@ -54,7 +57,7 @@ def copy_source(destination):
     (destination/'assets/screenshots').mkdir(parents=True)
     for name in ASSET_FILES:
         shutil.copy2(ROOT/'assets'/name,destination/'assets'/name)
-    for name in ('main.png','explorer.png','about.png','help.png','donate.png','system-tray.png','tray-menu.png','tray-drive-menu.png'):
+    for name in ('main.png','explorer.png','about.png','help.png','donate.png','system-tray.png','tray-menu.png','tray-drive-menu.png','folder-report.png','activity-log.png','space-growth.png','temperature-options.png','tracking-options.png','space-alert-options.png','update-options.png','drive-removal.png'):
         shutil.copy2(ROOT/'assets/screenshots'/name,destination/'assets/screenshots'/name)
     clean_files(destination)
     return destination
@@ -114,7 +117,7 @@ def package(payload,output):
         for name in ('README.md','CHANGELOG.md','LICENSE','THIRD_PARTY_NOTICES.md'):
             shutil.copy2(repo/name,portable/name)
         for directory in ('docs','licenses','assets'):
-            shutil.copytree(repo/directory,portable/directory)
+            shutil.copytree(repo/directory,portable/directory,dirs_exist_ok=True)
         clean_files(portable)
         result=smoke(portable/'FileBurglar.exe',scratch/'portable-selftest.json')
         assert Path(result['default_data_directory']).resolve()==(portable/'Data').resolve()
@@ -146,7 +149,7 @@ def package(payload,output):
         (release/'BUILD-MANIFEST.json').write_text(json.dumps(manifest,indent=2)+'\n',encoding='utf-8')
         shutil.copy2(ROOT/'docs/RELEASE-NOTES.md',release/'RELEASE-NOTES.md')
         (release/'UPLOAD-GUIDE.md').write_text(
-            '# File Burglar initial Windows release\n\n'
+            f'# File Burglar {APP_VERSION} Windows release\n\n'
             '1. Upload the contents of Repository to the root of snuffy420/FileBurglar.\n'
             '2. Enable GitHub Pages from main / (root) for docs/contact.html.\n'
             f'3. Create release v{APP_VERSION}; paste RELEASE-NOTES.md into its description.\n'

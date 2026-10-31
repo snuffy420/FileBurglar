@@ -79,14 +79,14 @@ def list_folder(path):
     subtree instead of interpreting an access failure as deletion.
     """
     files, subdirs = {}, []
-    if storage.is_own_path(path) or os.path.normcase(os.path.abspath(path)) == os.path.normcase(storage.DATA_DIR):
+    if storage.is_ignored_path(path) or os.path.normcase(os.path.abspath(path)) == os.path.normcase(storage.DATA_DIR):
         return files, subdirs
     try:
         with os.scandir(path) as it:
             for entry in it:
                 try:
                     if entry.is_dir(follow_symlinks=False):
-                        if not entry.is_junction() and not storage.is_own_path(entry.path):
+                        if not entry.is_junction() and not storage.is_ignored_path(entry.path):
                             subdirs.append(entry.path)
                     elif entry.is_file(follow_symlinks=False):
                         st = entry.stat(follow_symlinks=False)
@@ -106,6 +106,8 @@ def preserve_subtree(con, path, gen):
 
 def reconcile_folder(con, gen, baselined, path, files, log):
     """Reconcile files; migrated timestamps establish a baseline without false edits."""
+    if storage.is_excluded_path(path):return 0,0
+    if storage.needs_baseline(path):baselined=False
     if files is None:
         preserve_subtree(con, path, gen)
         return 0, 0
@@ -144,6 +146,7 @@ class Indexer:
         self.on_status = on_status or (lambda root, state: None)
         self.stop_event = threading.Event()
         self.pause_check = lambda: False
+        self.guard_check = lambda: True
         self.on_progress = lambda files, size, initial: None
         self._progress_at = 0.0
 
@@ -173,6 +176,7 @@ class Indexer:
         self.on_status(self.root, "stopped")
 
     def _run_scan(self):
+        if not self._valid():self.on_status(self.root,'stopped');return
         self.on_status(self.root, "indexing")
         con = storage.connect(self.db_path)
         try:
@@ -194,6 +198,7 @@ class Indexer:
                 self.on_status(self.root, "stopped")
                 return
             with storage.WRITE_LOCK:
+                if not self._valid():self.on_status(self.root,'stopped');return
                 self._sweep_gone(con, gen, log_changes=baselined)
                 lo, hi = storage.drive_range(self.root)
                 total_files, total_bytes = con.execute(
@@ -208,6 +213,7 @@ class Indexer:
                     "files = excluded.files, bytes = excluded.bytes, last_scan = excluded.last_scan",
                     (self.root, gen, total_files, total_bytes, time.time()),
                 )
+                if not self._valid():con.rollback();self.on_status(self.root,'stopped');return
                 con.commit()
             self.on_status(self.root, "ready")
         finally:
@@ -236,11 +242,13 @@ class Indexer:
                     break
             log = []
             with storage.WRITE_LOCK:
+                if not self._valid():break
                 for path, files in batch:
                     size, count = reconcile_folder(con, gen, baselined, path, files, log)
                     total_bytes += size
                     total_files += count
                 storage.record(con, log)
+                if not self._valid():con.rollback();break
                 con.commit()
             self._progress(total_files, total_bytes, False)
             self.stop_event.wait(0.025)
@@ -251,6 +259,10 @@ class Indexer:
         if now - self._progress_at >= 0.5:
             self._progress_at = now
             self.on_progress(files, size, initial)
+
+    def _valid(self):
+        if not self.guard_check():self.stop_event.set()
+        return not self.stop_event.is_set()
 
     def _walk_parallel(self, con, gen, baselined=False):
         # Enumeration continues while the single writer reconciles prior results.
@@ -321,11 +333,13 @@ class Indexer:
                     batch_files += len(item[1]) if item[1] else 0
                 log = []
                 with storage.WRITE_LOCK:
+                    if not self._valid():break
                     for path, files in batch:
                         size, count = reconcile_folder(con, gen, baselined, path, files, log)
                         total_files += count
                         total_bytes += size
                     storage.record(con, log)
+                    if not self._valid():con.rollback();break
                     con.commit()
                 self._progress(total_files, total_bytes, not baselined)
             if errors:

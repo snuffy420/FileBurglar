@@ -158,10 +158,10 @@ class ExplorerAndSensorTests(unittest.TestCase):
         engine = Engine(self.db)
         with patch.object(engine, '_start_index') as start:
             engine._drive(root, 'online', '')
-            start.assert_called_with(root, fast_startup=True)
+            start.assert_called_with(root, fast_startup=True, reason='Application startup')
             engine._drive(root, 'offline', '')
             engine._drive(root, 'online', '')
-            start.assert_called_with(root, fast_startup=False)
+            start.assert_called_with(root, fast_startup=False, reason='Drive or watcher reconnected')
 
     def test_fast_startup_preserves_catchup_change_logging(self):
         root = self.base / 'watched'

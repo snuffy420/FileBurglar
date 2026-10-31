@@ -56,13 +56,38 @@ def run(report_path):
         engine = Engine(db)
         window = MainWindow(engine,db)
         engine._set('Z:\\',state='ready',files=1,bytes=3)
+        engine._set('Y:\\',state='offline',files=1,bytes=5)
         window.show()
         app.processEvents()
-        for tab in range(3):
+        for tab in range(window.tabs.count()):
             window.tabs.setCurrentIndex(tab)
             window.refresh()
-            app.processEvents()
+            for _ in range(5):
+                app.processEvents()
+            if tab in (1,2):
+                table = window.report_table if tab == 1 else window.log_table
+                assert table.horizontalScrollBar().maximum() == 0
         result['checks']['main_window_tabs'] = True
+        result['checks']['report_columns_fit'] = True
+        assert window.card_size.value.text() == '3 B / 8 B'
+        result['checks']['online_and_saved_indexed_size'] = True
+        from feature_ui import Preferences
+        preferences=Preferences(window,window._limits)
+        preferences.show();app.processEvents()
+        assert 'health_enabled' in preferences.checks and 'auto_updates' in preferences.checks
+        assert preferences.reset.count()==2
+        preferences.reject();preferences.deleteLater()
+        window.features.refresh_growth(True)
+        deadline=time.monotonic()+8
+        while 'growth' in window.features.busy and time.monotonic()<deadline:
+            app.processEvents();time.sleep(.01)
+        assert 'growth' not in window.features.busy
+        result['checks']['feature_options_and_growth_view']=True
+        import ctypes
+        import devices
+        assert ctypes.sizeof(devices.NotifyFilter)==416
+        assert devices.cm.CM_Register_Notification and devices.cm.CM_Request_Device_EjectW
+        result['checks']['native_removal_api_imports']=True
         from about_dialog import AboutDialog, DONATION_BTC_ADDRESS
         about = AboutDialog(window)
         assert about.tabs.count() == 3 and about.address.text() == DONATION_BTC_ADDRESS
@@ -81,6 +106,17 @@ def run(report_path):
             time.sleep(.01)
         assert not explorer._busy and explorer.table.rowCount() == 1
         result['checks']['asynchronous_explorer'] = True
+        import volumes
+        con=window.con
+        volumes.bind(con,'selftest-stable-volume','W:\\')
+        fid=storage.folder_id(con,'W:\\Example')
+        con.execute('INSERT INTO files(folder_id,name,size) VALUES(?,?,?)',(fid,'demo.txt',7))
+        storage.record(con,[(time.time(),'W:\\Example\\demo.txt','added',7,7)])
+        volumes.offline(con,'selftest-stable-volume')
+        volumes.bind(con,'selftest-stable-volume','V:\\');con.commit()
+        assert con.execute('SELECT path FROM folders WHERE id=?',(fid,)).fetchone()[0]=='V:\\Example'
+        assert con.execute('SELECT observed_root FROM file_log WHERE volume_id=?',('selftest-stable-volume',)).fetchone()[0]=='W:\\'
+        result['checks']['stable_volume_letter_change']=True
         executable, arguments = main.startup_target()
         assert '--background' in arguments
         if result['frozen']:
@@ -95,6 +131,7 @@ def run(report_path):
         if explorer is not None:
             explorer.close()
         if window is not None:
+            window.features.stop()
             window.timer.stop()
             window.smart_timer.stop()
             window.hide()

@@ -25,7 +25,7 @@ class FolderUpdater(threading.Thread):
         self.stopped = threading.Event()
 
     def enqueue(self, root, path, recursive=False):
-        if not path or storage.is_own_path(path):
+        if not path or storage.is_ignored_path(path):
             return
         with self.condition:
             for (drive, existing), full in self.pending.items():
@@ -57,6 +57,13 @@ class FolderUpdater(threading.Thread):
         with self.condition:
             self.condition.notify_all()
 
+    def discard_excluded(self):
+        with self.condition:
+            self.pending={key:value for key,value in self.pending.items() if not storage.is_excluded_path(key[1])}
+
+    def discard_root(self,root):
+        with self.condition:self.pending={key:value for key,value in self.pending.items() if key[0]!=root}
+
     def stop(self):
         self.stopped.set()
         self.wake()
@@ -77,6 +84,7 @@ class FolderUpdater(threading.Thread):
                 error = ''
                 try:
                     remaining = self._scan(con, root, [(path, recursive)])
+                    if not remaining:storage.completed_baseline(path)
                     for folder, full in remaining:
                         self.enqueue(root, folder, full)
                 except Exception as exc:
@@ -95,6 +103,7 @@ class FolderUpdater(threading.Thread):
             if not self.can_work(root):
                 return stack
             path, recursive = stack.pop()
+            if storage.is_excluded_path(path):continue
             files, subdirs = list_folder(path)
             missing = False
             if files is None:

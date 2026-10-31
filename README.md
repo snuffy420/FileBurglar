@@ -6,12 +6,12 @@
 File Burglar helps you see where disk space is going. It saves an index of your files and folders, watches for changes, and reports which folders are gaining or freeing space. Drive health and available temperature readings stay accessible from the system tray.
 
 <p align="center">
-<a href="https://github.com/snuffy420/FileBurglar/releases/tag/v1.4.5">Download 1.4.5</a> ·
+<a href="https://github.com/snuffy420/FileBurglar/releases/tag/v1.5.4">Download 1.5.4</a> ·
 <a href="#features">Features</a> ·
 <a href="CHANGELOG.md">Changelog</a>
 </p>
 
-**Version 1.4.5** · **Windows 10/11 x64** · **GPL-3.0-or-later** · Created by **snuffy420 / zerØ software**
+**Version 1.5.4** · **Windows 10/11 x64** · **GPL-3.0-or-later** · Created by **snuffy420 / zerØ software**
 
 ![File Burglar main window](assets/screenshots/main.png)
 
@@ -21,28 +21,38 @@ Get the [Windows release](https://github.com/snuffy420/FileBurglar/releases):
 
 | Package | Use |
 | --- | --- |
-| [Windows x64 — installer](https://github.com/snuffy420/FileBurglar/releases/download/v1.4.5/FileBurglar-1.4.5-windows-x64-setup.exe) | Complete app, Start menu shortcuts, and an uninstaller. |
-| [Windows x64 — portable 7z](https://github.com/snuffy420/FileBurglar/releases/download/v1.4.5/FileBurglar-1.4.5-windows-x64-portable.7z) | Extract the entire folder and run `FileBurglar.exe`. |
-| Python source — [7z](https://github.com/snuffy420/FileBurglar/releases/download/v1.4.5/FileBurglar-1.4.5-source.7z) | Application source, assets, tests, and build scripts. |
+| [Windows x64 — installer](https://github.com/snuffy420/FileBurglar/releases/download/v1.5.4/FileBurglar-1.5.4-windows-x64-setup.exe) | Complete app, Start menu shortcuts, and an uninstaller. |
+| [Windows x64 — portable 7z](https://github.com/snuffy420/FileBurglar/releases/download/v1.5.4/FileBurglar-1.5.4-windows-x64-portable.7z) | Extract the entire folder and run `FileBurglar.exe`. |
+| Python source — [7z](https://github.com/snuffy420/FileBurglar/releases/download/v1.5.4/FileBurglar-1.5.4-source.7z) | Application source, assets, tests, and build scripts. |
 
 The installer and portable packages include Python and the required Qt runtime. **You do not need to install Python to use them.** Keep the executable and its `_internal` folder together. macOS, Linux, ARM64-native, and 32-bit builds are not provided in this release.
 
 ## Features
 
 - Persistent SQLite file/folder index with file counts, logical sizes, scan dates, and saved drive snapshots.
+- Saved data follows each drive by its Windows volume identity, so a drive that changes letters keeps its index, history, and settings. Unplugged drives keep their last letter and saved snapshot.
 - Fast, parallel opening scan after every launch, including drives with an existing index. Later rescans run as throttled background work.
 - One low-priority worker for new/changed folders, without repeatedly indexing whole drives.
-- Windows filesystem notifications for live additions, removals, renames, size changes, and timestamp changes.
-- Catch-up reporting for changes since the last completed index, without flooding activity history during a new drive's first baseline.
-- A dashboard for drive status, indexed files/size, today's changes, and queued paths.
+- Small, bounded storage. Repeated changes to the same file merge into one activity row per hour, history is capped by age and size, and new databases give trimmed space back to Windows, so programs that rewrite files constantly cannot fill your drive.
+- Windows filesystem notifications for live additions, removals, renames, size changes, and timestamp changes. Bursts of notifications are collected briefly so a file rewritten many times per second is checked once.
+- Catch-up reporting for changes since the last completed index, without flooding activity history during a new drive's first baseline. Reconnecting a known drive can show a summary of what changed while it was away.
+- A dashboard for drive status, indexed files/size, today's changes, and queued paths, with clear monitoring states: Watching, Updating folders, Deferred, Startup scan, Recovering, Paused, Released, Offline, and Error. The tray tooltip shows the same status.
 - Folder reports showing activity, written bytes, freed bytes, and last change, with period and drive filters.
 - A searchable activity log with drive/action filters and byte deltas.
+- A **What used my space?** view that ranks folders by net growth over the last hour, day, or week, counting each file once.
+- Copy any full path, and export the complete filtered folder report, activity log, or growth view to CSV.
 - A separate Explorer with breadcrumbs, location search, sortable sizes/counts, cached pages, and 500-item pagination.
 - Open indexed files, create folders, rename items, and send selected items to the Windows Recycle Bin. Drive roots are protected from rename/delete.
 - Drive identity, bus/media type, Windows health status, and available SMART/reliability counters.
-- Available temperatures in individual tray icons, with configurable internal/external warm and hot limits and on-screen temperature alerts.
+- Available temperatures in individual tray icons, with configurable internal/external warm and hot limits. Each heat episode raises at most one warm alert and one hot escalation, so readings hovering near a limit do not repeat notifications.
 - ATA SMART temperature fallback for supported SATA-class drives; unsupported readings show as unavailable rather than a false `0 °C`.
-- Global pause/resume and per-drive monitoring selection. Hiding a drive's temperature icon does not disable monitoring.
+- Health and temperature monitoring can be switched off independently of file monitoring.
+- Global pause/resume and per-drive monitoring selection. Hiding a drive's temperature icon does not disable monitoring. A **Refresh drives** button beside Explorer picks up newly connected drives immediately.
+- Folder exclusions for paths you never want indexed or reported. Re-including a folder rebuilds just that folder.
+- Game/work mode, turned on manually or automatically when chosen programs are running, postpones heavy catch-up work while still collecting changes.
+- Works with Windows Eject. File Burglar releases its own access when Windows asks to remove a drive, and offers **Release monitoring for removal**, **Resume monitoring**, and an optional Windows-confirmed **Safely eject device** for removable devices.
+- Optional notifications for low free space and rapid folder growth, each with its own limits.
+- Daily stable-release update checks with download, remind-later, and skip choices. Nothing is downloaded or installed automatically.
 - Opt-in Windows logon startup, using an elevated task for the current user.
 - Dark styling with orange accents, a dark-to-orange main-window gradient, and a magnifier/burglar icon at multiple display sizes.
 - Local error details, retry controls, and bounded diagnostic logs.
@@ -50,6 +60,31 @@ The installer and portable packages include Python and the required Qt runtime. 
 ![Indexed Explorer](assets/screenshots/explorer.png)
 
 Screenshots use synthetic demonstration data, not a user's private file index.
+
+## Reports and history
+
+**Folder report** totals written and freed bytes per folder for the period and drive you choose. **Activity log** lists individual changes; a file that keeps changing appears once per hour with that hour's total size change. **What used my space?** answers the most common question directly by ranking folders by net growth.
+
+![Folder report](assets/screenshots/folder-report.png)
+
+![Activity log](assets/screenshots/activity-log.png)
+
+![What used my space? growth view](assets/screenshots/space-growth.png)
+
+## Options
+
+Open **Options** from the main window to tune tracking, temperatures, alerts, and update checks, then choose **Save**. Per-drive choices are stored by volume identity, so they follow a drive even if its letter changes.
+
+<table>
+<tr><td><img src="assets/screenshots/tracking-options.png" alt="Tracking options: drives, exclusions and game/work mode"></td><td><img src="assets/screenshots/temperature-options.png" alt="Temperature options"></td></tr>
+<tr><td><img src="assets/screenshots/space-alert-options.png" alt="Space alert options"></td><td><img src="assets/screenshots/update-options.png" alt="Update options"></td></tr>
+</table>
+
+## Removing drives safely
+
+When you eject a drive, File Burglar stops its own watchers and workers first so Windows can complete the removal. You can also choose **Release monitoring for removal** from a drive's menu; File Burglar asks before letting go, and **Resume monitoring** picks the drive back up.
+
+![Drive removal confirmation](assets/screenshots/drive-removal.png)
 
 ## System tray
 
@@ -73,7 +108,7 @@ These examples use the app's actual icon artwork and menus with synthetic readin
 
 The opening scan intentionally prioritizes speed and can use noticeable CPU/disk bandwidth. After it completes, normal monitoring uses Windows change notifications and background-priority processing. **Pause monitoring** suspends scanning at safe boundaries as well as holding live changes. Selecting **Start with Windows** in the tray creates an opt-in logon task; it does not run an installer or register startup automatically.
 
-After the opening scan, there is **no timer that periodically re-indexes your drives**. Normal file changes update individual records; new directories get targeted, low-priority folder updates. A whole-drive recovery scan is reserved for a real loss of Windows notifications, a drive/feed reconnection, or an explicit retry. The app filters its own database and log notifications before queuing them.
+After the opening scan, there is **no timer that periodically re-indexes your drives**. Normal file changes update individual records; new directories get targeted, low-priority folder updates. A whole-drive recovery scan is reserved for a real loss of Windows notifications, a drive/feed reconnection, or an explicit retry. On very busy drives, recovery scans run at most once every 15 minutes per drive; further losses during that time queue a single follow-up scan. The app filters its own database and log notifications before queuing them.
 
 ## Data and privacy
 
@@ -83,7 +118,7 @@ After the opening scan, there is **no timer that periodically re-indexes your dr
 | Portable executable | `Data` beside `FileBurglar.exe`; keep `portable.txt` beside the executable. |
 | Python source checkout | Beside `storage.py`, preserving existing source-checkout data. |
 
-The index stores full file/folder names, sizes, and modification-time keys. It does not copy or hash file contents. Keep the index private. Release packages start with no personal index, settings, or activity logs. Uninstalling the installed app preserves its per-user data; portable data stays in its portable folder.
+The index stores full file/folder names, sizes, and modification-time keys. It does not copy or hash file contents. Keep the index private. It stays compact: about 400 MB for roughly 3 million files across six drives, with activity history limited to 30 days and 500,000 rows. Before a one-time database upgrade, File Burglar keeps a single safety backup and removes it 7 days after the upgrade completes. Release packages start with no personal index, settings, or activity logs. Uninstalling the installed app preserves its per-user data; portable data stays in its portable folder.
 
 The app does not upload the index or diagnostics. The optional contact page sends only the fields you submit to your maintainer through Formspree; it does not attach files or logs automatically.
 
@@ -92,6 +127,7 @@ The app does not upload the index or diagnostics. The optional contact page send
 - The browser and reports reflect the saved index, not an always-current filesystem view. Use Refresh or allow reconciliation to complete.
 - Sizes are logical file sizes, not unique physical allocation. Hard links, sparse files, and compression can make totals differ from Explorer's free-space calculation.
 - The app compares size and modification time. A content edit preserving both can escape detection. Changes during a notification overflow or while the app is stopped may be recovered as final state rather than a complete audit of transient files.
+- Activity history is a summary, not a keystroke-level audit. Repeated changes to a file within an hour become one row, a file created and deleted within the same hour leaves no row, and rows older than 30 days or beyond the 500,000 most recent are trimmed. Daily folder totals are kept for a year.
 - Unreadable folders retain their last known snapshot. Symbolic links and junctions are skipped to avoid traversing linked trees repeatedly.
 - SMART counters vary by hardware, USB bridge, driver, and permissions. Some drives will not provide temperature/wear information; ambiguous storage identities are not assigned to an arbitrary disk.
 - This release is not a backup, recovery tool, forensic audit, or replacement for drive-manufacturer diagnostics.

@@ -35,6 +35,10 @@ class IndexTests(unittest.TestCase):
         self.base.mkdir()
         self.own = patch('storage.DATA_DIR', str(self.base / 'app-data'))
         self.own.start()
+        # These tests check change detection row by row; hourly merging is
+        # covered separately in test_disk_budget.py.
+        self.merge = patch('storage.LOG_MERGE_SECONDS', 0)
+        self.merge.start()
         self.root = self.base / 'watched'
         self.root.mkdir()
         self.db = str(self.base / 'test.db')
@@ -44,6 +48,7 @@ class IndexTests(unittest.TestCase):
 
     def tearDown(self):
         self.con.close()
+        self.merge.stop()
         self.own.stop()
         assert self.base.parent == Path(__file__).resolve().parent and self.base.name.startswith('test-work-')
         shutil.rmtree(self.base)
@@ -290,7 +295,7 @@ class IndexTests(unittest.TestCase):
         self.engine.retry_drive(root)
         with patch.object(self.engine,'_start_index') as start:
             self.engine._handle(self.con,self.engine.controls.get_nowait(),[])
-            start.assert_called_once_with(root,fast_startup=True)
+            start.assert_called_once_with(root,fast_startup=True,reason='Manual retry')
 
     def test_idle_engine_stop_wakes_immediately(self):
         with patch('engine.lower_thread_priority'):

@@ -12,6 +12,9 @@ def render(app, window, assets):
     limits = settings.load()
     limits['tray_drives'] = ['C:', 'D:', 'E:', 'F:']
     settings.save(limits)
+    # These four readings are synthetic, including two extra demo tray drives.
+    snapshot=window.engine.snapshot()
+    demo_snapshot=dict(snapshot,**{r+'\\':dict(state='ready') for r in ('C:','D:','E:','F:')})
     original_disks = window._disks
     original_limits = window._limits
     window._limits = limits
@@ -24,7 +27,7 @@ def render(app, window, assets):
     tray = None
     preview = QWidget()
     try:
-        with patch('main.autostart_enabled',return_value=False):
+        with patch('main.autostart_enabled',return_value=False),patch.object(window.engine,'snapshot',return_value=demo_snapshot),patch('main.settings.load',return_value=limits):
             tray = main.Tray(app, window, window.engine)
         preview.setStyleSheet('QWidget { background: #161616; color: #E9E9E9; font-family: "Segoe UI"; }')
         layout=QVBoxLayout(preview);layout.setContentsMargins(24,20,24,20);layout.setSpacing(16)

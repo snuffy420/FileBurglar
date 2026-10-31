@@ -4,6 +4,7 @@ import ctypes
 import os
 import sys
 import subprocess
+import sqlite3
 from ctypes import wintypes
 
 from PyQt6.QtCore import QPointF, QRectF, QSize, Qt
@@ -186,6 +187,7 @@ class Tray:
     def __init__(self, app, window, engine):
         self.app = app
         self.window = window
+        window.tray=self
         self.engine = engine
         self.icon = QSystemTrayIcon(tray_icon(), app)
         self.icon.setToolTip(APP_NAME)
@@ -196,6 +198,12 @@ class Tray:
         about_action = QAction("About / Help / Donate", menu)
         about_action.triggered.connect(window._open_about)
         menu.addAction(about_action)
+        update_action=menu.addAction('Check for updates')
+        update_action.triggered.connect(lambda:window.features.check_updates(True))
+        self.work_action=menu.addAction('Game/work mode')
+        self.work_action.setCheckable(True);self.work_action.setChecked(window._limits.get('game_mode',False))
+        self.work_action.toggled.connect(window.features.work_button.setChecked)
+        window.features.work_button.toggled.connect(self.work_action.setChecked)
         self.pause_action = QAction("Pause monitoring", menu)
         self.pause_action.setCheckable(True)
         self.pause_action.toggled.connect(self._toggle_pause)
@@ -259,7 +267,8 @@ class Tray:
 
     def _sync_drive_icons(self):
         # Keep one icon per tray drive; each shows its live temperature and turns red when hot.
-        selected = settings.load()["tray_drives"]
+        online={root[:2] for root,s in self.window.engine.snapshot().items() if s['state'] not in ('offline','released','ejecting') and root not in self.window.engine.released_roots}
+        selected = [r for r in settings.load()['tray_drives'] if r in online] if self.window._limits.get('health_enabled',True) else []
         disks = self.window._disks
         for root in [r for r in self.drive_icons if r not in selected]:
             icon = self.drive_icons.pop(root)
@@ -343,7 +352,15 @@ def main() -> int:
     lower_process_priority()
 
     db_path = storage.default_db_path()
-    storage.init(db_path)
+    try:
+        storage.init(db_path)
+    except (OSError, sqlite3.Error) as exc:
+        ctypes.windll.user32.MessageBoxW(
+            None, f'File Burglar could not open or upgrade its saved index.\n\n{exc}\n\n'
+            f'Database: {db_path}\n\n'
+            'Monitoring has not started. Keep the database and any safety backups. '
+            'If the drive is full, free space and try again.', APP_NAME, 0x10)
+        return 1
 
     ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("FileBurglar.Desktop")
     app = QApplication(sys.argv)
@@ -352,8 +369,16 @@ def main() -> int:
     app.setWindowIcon(tray_icon())
 
     engine = Engine(db_path)
-    manager = DriveManager(engine.on_events, engine.on_overflow, engine.on_drive)
+    storage.set_exclusions(settings.load()['exclusions'])
+    con=storage.connect(db_path)
+    try:
+        storage.prune_exclusions(con)
+        engine._reload_volumes(con)
+    finally:con.close()
+    manager = DriveManager(engine.on_events, engine.on_overflow, engine.on_drive,engine=engine)
     window = MainWindow(engine, db_path)
+    window.features.manager=manager
+    manager.capacity_idle=window.features.measurement_idle
     window.setWindowIcon(tray_icon())
     window.brand_icon.setPixmap(tray_icon().pixmap(QSize(32, 32)))
     tray = Tray(app, window, engine)
@@ -362,6 +387,7 @@ def main() -> int:
     manager.start()
 
     def shutdown():
+        window.features.stop()
         manager.stop()
         manager.join(timeout=10)
         engine.stop()

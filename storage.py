@@ -3,7 +3,9 @@
 - drives:       one row per drive root: scan generation, baseline flag, totals
 - folders:      folder paths; `scan` is the generation of the last scan that saw them
 - files:        (folder_id, name) -> size, the index itself
-- file_log:     one row per detected change (the detailed report)
+- file_log:     detected changes (the detailed report). Repeated changes to one
+                file within an hour are merged into a single row, and the table is
+                capped by age and row count so busy folders cannot grow it unbounded.
 - folder_daily: per-day, per-folder totals that feed the Folder report
 """
 
@@ -12,6 +14,8 @@ import sqlite3
 import sys
 import threading
 import time
+import json
+import volumes
 from datetime import date, timedelta
 
 from appinfo import APP_FOLDER, DB_FILE
@@ -58,16 +62,19 @@ CREATE TABLE IF NOT EXISTS folder_daily (
     last_ts REAL NOT NULL DEFAULT 0,
     PRIMARY KEY (day, drive, folder)
 ) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS volume_identity(root TEXT PRIMARY KEY, identity TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS app_meta(key TEXT PRIMARY KEY,value TEXT NOT NULL);
 """
 
 DAILY_UPSERT = """
-INSERT INTO folder_daily (day, drive, folder, events, added, freed, last_ts)
-VALUES (?, ?, ?, ?, ?, ?, ?)
+INSERT INTO folder_daily (day, drive, folder, events, added, freed, last_ts, volume_id, relative_path)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (day, drive, folder) DO UPDATE SET
     events = events + excluded.events,
     added = added + excluded.added,
     freed = freed + excluded.freed,
-    last_ts = MAX(last_ts, excluded.last_ts)
+    last_ts = MAX(last_ts, excluded.last_ts),
+    volume_id = COALESCE(excluded.volume_id, volume_id), relative_path = excluded.relative_path
 """
 
 
@@ -90,6 +97,72 @@ DATA_DIR = runtime_data_dir()
 # Writers in this program take turns on this lock. Each one commits before releasing it,
 # so no connection holds the database write lock while another writer waits on it.
 WRITE_LOCK = threading.RLock()
+
+# Activity log size controls. A program that rewrites the same files every few
+# seconds produced millions of rows a day; merging per file and hour keeps the
+# history while bounding the table. Set LOG_MERGE_SECONDS to 0 to disable merging.
+LOG_MERGE_SECONDS = 3600
+LOG_MAX_ROWS = 500_000
+_MERGE_PATHS = 20_000  # recent paths remembered for merging (bounded memory)
+_merge_lock = threading.Lock()
+_merge_state = {}  # database file -> [bucket, {path: [rowid, action]}]
+EXCLUSIONS = ()
+BASELINE_PATHS = ()
+
+
+def set_exclusions(paths):
+    global EXCLUSIONS
+    EXCLUSIONS=tuple(sorted({os.path.normcase(os.path.abspath(p)).rstrip('\\') for p in paths
+                             if isinstance(p,str) and os.path.isabs(p)}))
+
+
+def is_excluded_path(path):
+    if not EXCLUSIONS:return False
+    candidate=os.path.normcase(os.path.abspath(path)).rstrip('\\')
+    return any(candidate==p or candidate.startswith(p+'\\') for p in EXCLUSIONS)
+
+
+def is_ignored_path(path):
+    return is_own_path(path) or is_excluded_path(path)
+
+
+def prune_exclusions(con):
+    """Forget excluded coverage without recording fictitious deletions."""
+    global BASELINE_PATHS
+    row=con.execute("SELECT value FROM app_meta WHERE key='exclusions'").fetchone()
+    encoded=json.dumps(EXCLUSIONS)
+    if row and row[0]==encoded:return
+    previous=json.loads(row[0]) if row else []
+    BASELINE_PATHS=tuple(p for p in previous if not is_excluded_path(p))
+    for path in EXCLUSIONS:
+        clause='(path=? COLLATE NOCASE OR (path>=? COLLATE NOCASE AND path<? COLLATE NOCASE))'
+        args=(path,path+'\\',path+']')
+        while True:
+            rows=con.execute('SELECT id FROM folders WHERE '+clause+' LIMIT 256',args).fetchall()
+            if not rows:break
+            con.executemany('DELETE FROM files WHERE folder_id=?',rows)
+            con.executemany('DELETE FROM folders WHERE id=?',rows)
+        con.execute('DELETE FROM file_log WHERE '+clause,args)
+        con.execute('DELETE FROM folder_daily WHERE '+clause.replace('path','folder'),args)
+    for (root,) in con.execute('SELECT root FROM drives').fetchall():
+        normalized=os.path.normcase(root).rstrip('\\')
+        if not any(p==normalized or p.startswith(normalized+'\\') for p in EXCLUSIONS):continue
+        lo,hi=drive_range(root)
+        count,size=con.execute('SELECT COALESCE(SUM(COALESCE(file_count,(SELECT COUNT(*) FROM files WHERE folder_id=folders.id))),0),COALESCE(SUM(COALESCE(byte_count,(SELECT SUM(size) FROM files WHERE folder_id=folders.id))),0) FROM folders WHERE path>=? AND path<?',(lo,hi)).fetchone()
+        con.execute('UPDATE drives SET files=?,bytes=? WHERE root=?',(count,size,root))
+    con.execute("INSERT INTO app_meta VALUES('exclusions',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",(encoded,))
+    con.commit()
+
+
+def needs_baseline(path):
+    path=os.path.normcase(os.path.abspath(path)).rstrip('\\')
+    return any(path==p or path.startswith(p+'\\') for p in BASELINE_PATHS)
+
+
+def completed_baseline(path):
+    global BASELINE_PATHS
+    path=os.path.normcase(os.path.abspath(path)).rstrip('\\')
+    BASELINE_PATHS=tuple(p for p in BASELINE_PATHS if not (p==path or p.startswith(path+'\\')))
 
 
 def data_dir() -> str:
@@ -125,11 +198,34 @@ def connect(db_path: str) -> sqlite3.Connection:
     con.execute("PRAGMA journal_mode=WAL")
     con.execute("PRAGMA synchronous=NORMAL")
     con.execute("PRAGMA cache_size=-4096")  # 4 MiB page cache keeps RAM low
+    # Truncate the write-ahead log after checkpoints so a large scan cannot leave
+    # a multi-gigabyte -wal file behind.
+    con.execute("PRAGMA journal_size_limit=67108864")
     return con
 
 
 def init(db_path: str) -> None:
+    import volumes
+    volumes.check_upgrade_space(db_path)
+    volumes.backup_before_migration(db_path)
+    if not os.path.exists(db_path) or not os.path.getsize(db_path):
+        # New databases return freed pages to Windows after old history is
+        # pruned. This must be set before WAL mode and before any table exists.
+        fresh = sqlite3.connect(db_path)
+        try:
+            fresh.execute("PRAGMA auto_vacuum=INCREMENTAL")
+            fresh.execute("PRAGMA journal_mode=WAL")
+        finally:
+            fresh.close()
     con = connect(db_path)
+    try:
+        _init_schema(con)
+    finally:
+        con.close()
+    volumes.cleanup_migration_backups(db_path)
+
+
+def _init_schema(con):
     con.executescript(SCHEMA)
     if "mtime_ns" not in {row[1] for row in con.execute("PRAGMA table_info(files)")}:
         con.execute("ALTER TABLE files ADD COLUMN mtime_ns INTEGER NOT NULL DEFAULT 0")
@@ -138,11 +234,22 @@ def init(db_path: str) -> None:
         if column not in columns:
             con.execute(f"ALTER TABLE folders ADD COLUMN {column} INTEGER")
     con.commit()
-    con.close()
+    volumes.migrate(con)
 
 
 def default_db_path() -> str:
     return os.path.join(data_dir(), DB_FILE)
+
+
+def filter_root(con,value):
+    if not value:return None
+    row=con.execute('SELECT namespace FROM volumes WHERE id=?',(value,)).fetchone()
+    return row[0] if row else value.rstrip('\\')+'\\'
+
+
+def filter_identity(con,value):
+    if not value:return None
+    return value if con.execute('SELECT 1 FROM volumes WHERE id=?',(value,)).fetchone() else None
 
 
 def drive_range(root: str):
@@ -152,26 +259,112 @@ def drive_range(root: str):
 
 def folder_id(con: sqlite3.Connection, path: str) -> int:
     """Id of a folder row, created on demand; its scan generation is left alone."""
-    con.execute("INSERT OR IGNORE INTO folders (path) VALUES (?)", (path,))
+    import volumes
+    root=os.path.splitdrive(path)[0]+os.sep
+    con.execute("INSERT OR IGNORE INTO folders (path,volume_id) VALUES (?,?)", (path,volumes.owner(con,path)))
     return con.execute("SELECT id FROM folders WHERE path = ?", (path,)).fetchone()[0]
 
 
 def visit_folder(con: sqlite3.Connection, path: str, gen: int) -> int:
     """Id of a folder row, marked as seen by scan generation `gen`."""
     return con.execute(
-        "INSERT INTO folders (path, scan) VALUES (?, ?) "
+        "INSERT INTO folders (path, scan,volume_id) VALUES (?, ?, ?) "
         "ON CONFLICT (path) DO UPDATE SET scan = excluded.scan RETURNING id",
-        (path, gen),
+        (path, gen, volumes.owner(con,path)),
     ).fetchone()[0]
+
+
+def merged_action(previous, new):
+    """Net action for two changes to one path; None means nothing remains to report."""
+    if new == "removed":
+        return None if previous == "added" else "removed"
+    if new == "added":
+        return "changed" if previous == "removed" else previous
+    return previous
+
+
+def _merge_paths(name, bucket):
+    state = _merge_state.get(name)
+    if state is None:
+        if len(_merge_state) >= 4:
+            _merge_state.clear()
+        state = _merge_state[name] = [bucket, {}]
+    if state[0] != bucket:
+        state[0] = bucket
+        state[1].clear()
+    return state[1]
+
+
+INSERT_LOG = ("INSERT INTO file_log (ts,path,action,delta,size,volume_id,observed_root,legacy_unverified) "
+              "VALUES(?,?,?,?,?,?,?,0)")
+
+
+def _write_log(con, rows, owners):
+    if LOG_MERGE_SECONDS <= 0:
+        con.executemany(INSERT_LOG, [(ts, path, action, delta, size,
+                                      owners.get(os.path.splitdrive(path)[0] + os.sep),
+                                      os.path.splitdrive(path)[0] + os.sep)
+                                     for ts, path, action, delta, size in rows])
+        return
+    name = con.execute("PRAGMA database_list").fetchone()[2] or ":memory:"
+    with _merge_lock:
+        for ts, path, action, delta, size in rows:
+            recent = _merge_paths(name, int(ts // LOG_MERGE_SECONDS))
+            hit = recent.get(path)
+            root = os.path.splitdrive(path)[0] + os.sep
+            volume = owners.get(root)
+            if hit is not None:
+                merged = merged_action(hit[1], action)
+                # The id, path and volume must all still match, so a pruned,
+                # rolled-back or remapped row is never merged into.
+                if merged is None:
+                    # Created and deleted within the hour: no net change to report.
+                    cursor = con.execute("DELETE FROM file_log WHERE id=? AND path=? AND volume_id IS ?",
+                                         (hit[0], path, volume))
+                else:
+                    cursor = con.execute("UPDATE file_log SET ts=?, action=?, delta=delta+?, size=? "
+                                         "WHERE id=? AND path=? AND volume_id IS ?",
+                                         (ts, merged, delta, size, hit[0], path, volume))
+                if cursor.rowcount:
+                    if merged is None:
+                        del recent[path]
+                    else:
+                        hit[1] = merged
+                    continue
+                del recent[path]  # row was pruned, rolled back or moved; start a new one
+            cursor = con.execute(INSERT_LOG, (ts, path, action, delta, size, volume, root))
+            if len(recent) < _MERGE_PATHS:
+                recent[path] = [cursor.lastrowid, action]
+
+
+def prune_log(con, max_age_seconds, max_rows=None, chunk=20_000):
+    """Delete one bounded chunk of expired or excess history. True means more remains."""
+    max_rows = LOG_MAX_ROWS if max_rows is None else max_rows
+    cutoff = time.time() - max_age_seconds
+    removed = con.execute("DELETE FROM file_log WHERE id IN (SELECT id FROM file_log WHERE ts < ? LIMIT ?)",
+                          (cutoff, chunk)).rowcount
+    if removed < chunk:
+        row = con.execute("SELECT id FROM file_log ORDER BY id DESC LIMIT 1 OFFSET ?", (max_rows,)).fetchone()
+        if row:
+            removed += con.execute("DELETE FROM file_log WHERE id IN (SELECT id FROM file_log WHERE id <= ? "
+                                   "ORDER BY id LIMIT ?)", (row[0], chunk - removed)).rowcount
+    with _merge_lock:
+        _merge_state.clear()  # merged rows may have been deleted
+    return removed >= chunk
+
+
+def release_free_space(con, pages=4096):
+    """Give up to `pages` free database pages back to Windows (incremental-vacuum databases)."""
+    if con.execute("PRAGMA auto_vacuum").fetchone()[0] == 2:
+        con.execute(f"PRAGMA incremental_vacuum({int(pages)})").fetchall()
 
 
 def record(con: sqlite3.Connection, rows) -> None:
     """Store change rows (ts, path, action, delta, size) and roll them into folder_daily."""
     if not rows:
         return
-    con.executemany(
-        "INSERT INTO file_log (ts, path, action, delta, size) VALUES (?, ?, ?, ?, ?)", rows
-    )
+    owners=dict(con.execute('SELECT root,volume_id FROM drives'))
+    _write_log(con, rows, owners)
     totals = {}
     for ts, path, _action, delta, _size in rows:
         folder = os.path.split(path)[0]
@@ -188,7 +381,7 @@ def record(con: sqlite3.Connection, rows) -> None:
             vals[3] = ts
     con.executemany(
         DAILY_UPSERT,
-        [(day, drive, folder, *vals) for (day, drive, folder), vals in totals.items()],
+        [(day, drive, folder, *vals,owners.get(drive+os.sep),None) for (day, drive, folder), vals in totals.items()],
     )
 
 

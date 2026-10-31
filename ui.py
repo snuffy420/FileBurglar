@@ -15,7 +15,7 @@ from pathlib import Path
 from ctypes import wintypes
 from datetime import date, datetime
 
-from PyQt6.QtCore import QPoint, QPointF, QPropertyAnimation, QRectF, Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import QEvent, QPoint, QPointF, QPropertyAnimation, QRectF, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QAction, QColor, QPainter, QPen
 from PyQt6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog, QFrame, QGraphicsDropShadowEffect,
                              QGridLayout, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit, QMainWindow,
@@ -25,6 +25,7 @@ from PyQt6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComboB
 import storage
 import smart
 import settings
+import volumes
 from appinfo import APP_NAME, APP_VERSION
 
 ORANGE = "#FF8A1F"
@@ -48,6 +49,12 @@ PANEL_GRADIENT = f"qlineargradient(x1: 0, y1: 1, x2: 0, y2: 0, stop: 0 #5A4A0A, 
 
 STYLE = f"""
 QWidget {{ color: {TEXT}; font-family: 'Segoe UI'; font-size: 10pt; }}
+QDialog {{ background-color: {PANEL}; color: {TEXT}; }}
+QDialog QLabel {{ background: transparent; color: {TEXT}; }}
+QDialog QDialogButtonBox {{ background-color: {PANEL}; }}
+QTextEdit, QTextBrowser, QListView, QTreeView {{ background-color: #191919; color: {TEXT}; border: 1px solid {EDGE}; selection-background-color: {ORANGE}; selection-color: {BG}; }}
+QProgressBar {{ background: #222222; color: {TEXT}; border: 1px solid {EDGE}; border-radius: 4px; text-align: center; }}
+QProgressBar::chunk {{ background: {ORANGE}; border-radius: 3px; }}
 QWidget#root {{ background: qlineargradient(x1: 0, y1: 1, x2: 0, y2: 0, stop: 0 #7A4A12, stop: 0.2 #3B2609, stop: 0.42 {BG}, stop: 1 {BG}); border: 1px solid {EDGE}; border-radius: 14px; }}
 QWidget#titlebar {{ background: transparent; }}
 QPushButton#winbtn {{ background: transparent; border: none; color: {MUTED}; padding: 4px 10px; font-size: 12pt; }}
@@ -68,6 +75,12 @@ QComboBox:focus, QLineEdit:focus {{ border-color: {NEON}; }}
 QSpinBox {{ background: #1F1F1F; border: 1px solid {EDGE}; border-radius: 6px; padding: 5px 8px; min-width: 90px; color: {TEXT}; }}
 QSpinBox:focus {{ border-color: {NEON}; }}
 QCheckBox {{ color: {TEXT}; spacing: 8px; }}
+QCheckBox::indicator {{ width: 16px; height: 16px; border: 1px solid #686868; border-radius: 4px; background: #202020; }}
+QCheckBox::indicator:hover {{ border-color: {ORANGE}; }}
+QCheckBox::indicator:checked {{ background: {ORANGE}; border: 2px solid #FFBD72; }}
+QCheckBox::indicator:disabled {{ background: #292929; border-color: #444444; }}
+QPlainTextEdit {{ background: #191919; color: {TEXT}; border: 1px solid #454545; border-radius: 8px; padding: 10px; selection-background-color: {ORANGE}; selection-color: {BG}; }}
+QPlainTextEdit:focus {{ border-color: {ORANGE}; }}
 QComboBox QAbstractItemView {{ background: #1F1F1F; selection-background-color: {ORANGE}; selection-color: {BG}; }}
 QTabWidget::pane {{ border: 1px solid {EDGE}; border-radius: 10px; background: {PANEL_GRADIENT}; top: -1px; }}
 QTabBar::tab {{ background: #181818; color: {MUTED}; padding: 8px 20px; border: 1px solid {EDGE}; border-bottom: none;
@@ -146,6 +159,34 @@ def signed_bytes(n) -> str:
     return sign + human_bytes(n)
 
 
+def indexed_size_text(connected, saved):
+    """Do not round away the difference made by an offline drive."""
+    left, right = human_bytes(connected), human_bytes(saved)
+    if connected == saved or left != right:
+        return f"{left} / {right}"
+    for unit, divisor in (("TB", 1024**4), ("GB", 1024**3), ("MB", 1024**2), ("KB", 1024)):
+        if saved < divisor:
+            continue
+        for precision in (2, 3):
+            left = f"{connected/divisor:,.{precision}f} {unit}"
+            right = f"{saved/divisor:,.{precision}f} {unit}"
+            if left != right:
+                return f"{left} / {right}"
+    return f"{connected:,} B / {saved:,} B"
+
+
+def monitoring_label(root,info,engine):
+    state=info.get('state','offline')
+    if root in engine.released_roots:return 'RELEASED'
+    if state in ('offline','error'):return state.upper()
+    if state=='unmonitored':return 'NOT MONITORED'
+    if engine.paused or root in engine.paused_drives:return 'PAUSED'
+    if engine.work_mode and (root in engine.rescan_pending or (state=='indexing' and info.get('scan_mode')!='startup')):return 'RECOVERY DEFERRED'
+    if state=='indexing':return 'STARTUP SCAN' if info.get('scan_mode')=='startup' else 'RECOVERING'
+    if engine.work_mode and (info.get('held') or info.get('folder_updates')):return 'UPDATES DEFERRED'
+    return 'UPDATING FOLDERS' if info.get('folder_updates') else 'WATCHING'
+
+
 def stamp(ts) -> str:
     return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S") if ts else "never"
 
@@ -164,14 +205,64 @@ class SortItem(QTableWidgetItem):
 
 def cell(text, color=None):
     item = QTableWidgetItem(text)
+    item.setToolTip(text)
     item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
     if color:
         item.setForeground(QColor(color))
     return item
 
 
+class ReportTable(QTableWidget):
+    """Fit defaults to the viewport until the user adjusts a column."""
+    def configure_fit(self, widths, path_column):
+        self._fit_widths = widths
+        self._path_column = path_column
+        self._manual_widths = False
+        self._fitting = False
+        self.horizontalHeader().setStretchLastSection(False)
+        self.horizontalHeader().sectionResized.connect(self._column_resized)
+        self.viewport().installEventFilter(self)
+        self._fit_timer = QTimer(self)
+        self._fit_timer.setSingleShot(True)
+        self._fit_timer.timeout.connect(self._fit_viewport)
+        self._fit_timer.start(0)
+
+    def _column_resized(self, column, old, new):
+        if not self._fitting:
+            self._manual_widths = True
+
+    def eventFilter(self, watched, event):
+        if (event.type() == QEvent.Type.Resize
+                and getattr(self, '_fit_timer', None) is not None and not self._manual_widths):
+            self._fit_timer.start(0)
+        return super().eventFilter(watched, event)
+
+    def _fit_viewport(self):
+        if self._manual_widths:
+            return
+        available = self.viewport().width()
+        if available <= 0:
+            return
+        scale = self.fontMetrics().height() / 16
+        widths = [max(40, round(w * scale)) for w in self._fit_widths]
+        fixed = sum(w for c, w in enumerate(widths) if c != self._path_column)
+        # Reserve at least a quarter of the view for paths at smaller sizes.
+        ratio = min(1, available * .75 / max(1, fixed))
+        self._fitting = True
+        try:
+            used = 0
+            for column, width in enumerate(widths):
+                if column != self._path_column:
+                    width = max(1, int(width * ratio))
+                    self.setColumnWidth(column, width)
+                    used += self.columnWidth(column)
+            self.setColumnWidth(self._path_column, max(1, available - used))
+        finally:
+            self._fitting = False
+
+
 def make_table(headers):
-    table = QTableWidget(0, len(headers))
+    table = ReportTable(0, len(headers))
     table.setHorizontalHeaderLabels(headers)
     table.setAlternatingRowColors(True)
     table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -181,6 +272,8 @@ def make_table(headers):
     table.horizontalHeader().setStretchLastSection(True)
     table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
     table.setShowGrid(False)
+    table.setWordWrap(False)
+    table.setTextElideMode(Qt.TextElideMode.ElideRight)
     table.setSortingEnabled(True)
     return table
 
@@ -221,15 +314,16 @@ class Card(QFrame):
 
 def sync_drive_combo(combo, drives):
     """Rebuild the drive filter when drives appear or go away, keeping the current choice."""
-    wanted = [None] + drives
-    if [combo.itemData(i) for i in range(combo.count())] == wanted:
+    choices=[d if isinstance(d,tuple) else (d,d) for d in drives]
+    wanted = [None] + [value for label,value in choices]
+    if [combo.itemData(i) for i in range(combo.count())] == wanted and [combo.itemText(i) for i in range(1,combo.count())]==[label for label,value in choices]:
         return
     current = combo.currentData()
     combo.blockSignals(True)
     combo.clear()
     combo.addItem("All drives", None)
-    for drive in drives:
-        combo.addItem(drive, drive)
+    for label,value in choices:
+        combo.addItem(label,value)
     index = combo.findData(current) if current else 0
     combo.setCurrentIndex(max(index, 0))
     combo.blockSignals(False)
@@ -374,13 +468,12 @@ class DriveTile(QFrame):
         self.state = state
         self.title.setText(self._title_text())
         self.title.setStyleSheet(f"font-weight: bold; color: {color};")
-        if state == "offline":
-            self.space.setText("not connected")
+        if state in ('offline','released','ejecting'):
+            self.space.setText('not connected' if state=='offline' else 'released for removal')
             return
-        try:
-            usage = shutil.disk_usage(self.root)
-        except OSError:
-            self.space.setText("space unavailable")
+        usage=getattr(self,'capacity',None)
+        if usage is None:
+            self.space.setText('checking space…')
             return
         self.space.setText(f"{human_bytes(usage.free)} free of {human_bytes(usage.total)}")
 
@@ -627,6 +720,7 @@ class ExplorerWindow(QWidget):
         self._request_id = 0
         self._cancel = threading.Event()
         self._cache = OrderedDict()
+        self._volume_context={}
         self._item_icons = {
             "drive": self.style().standardIcon(QStyle.StandardPixmap.SP_DriveHDIcon),
             "folder": self.style().standardIcon(QStyle.StandardPixmap.SP_DirIcon),
@@ -801,6 +895,7 @@ class ExplorerWindow(QWidget):
         cached = self._cache.get(key)
         if cached and time.monotonic()-cached[0] < 20 and not force:
             self._cache.move_to_end(key)
+            self._volume_context=cached[3] if len(cached)>3 else {}
             self._render(cached[1],cached[2])
             self._pending = None
             if self._busy:
@@ -827,8 +922,10 @@ class ExplorerWindow(QWidget):
                 con = sqlite3.connect(Path(self.db_path).as_uri()+"?mode=ro", uri=True, timeout=3)
                 con.execute("PRAGMA cache_size=-1024")
                 con.set_progress_handler(lambda: int(cancel.is_set()), 1000)
+                con.execute('BEGIN')
                 rows, more = storage.explorer_page(con, *key, limit=self.PAGE_SIZE)
-                result = (key,rows,more,None)
+                context={v['namespace']:(v['id'],bool(v['present'])) for v in volumes.rows(con)}
+                result = (key,rows,more,None,context)
             except Exception as exc:
                 result = (key,[],False,str(exc))
             finally:
@@ -839,13 +936,14 @@ class ExplorerWindow(QWidget):
 
     def _receive(self, request, result):
         self._busy = False
-        key,rows,more,error = result
+        key,rows,more,error,*context = result
         if request == self._request_id:
             if error:
                 self.status_label.setText("Could not load this location. Try Refresh.")
                 self.status_label.setToolTip(error)
             else:
-                self._cache[key] = (time.monotonic(),rows,more)
+                self._volume_context=context[0] if context else {}
+                self._cache[key] = (time.monotonic(),rows,more,self._volume_context)
                 while len(self._cache)>8:
                     self._cache.popitem(last=False)
                 if self.isVisible():
@@ -899,6 +997,7 @@ class ExplorerWindow(QWidget):
         if kind in ("folder", "drive"):
             self._navigate(path)
         else:
+            if not self._valid_paths([path]):return
             try:
                 os.startfile(path)
             except OSError as err:
@@ -911,24 +1010,28 @@ class ExplorerWindow(QWidget):
         self._navigate(None if parent == self.current else parent)
 
     def _new_folder(self):
+        current=self.current;context=dict(self._volume_context)
         name, ok = QInputDialog.getText(self, "New folder", "Folder name:")
         name = name.strip()
         if not ok or not name:
             return
+        if not self._valid_paths([current],context):return
         try:
-            os.mkdir(os.path.join(self.current, name))
+            os.mkdir(os.path.join(current, name))
         except OSError as err:
             self._fail(err)
             return
         self._changed()
 
     def _rename(self):
+        context=dict(self._volume_context)
         _kind, path = self._selected()[0]
         old = os.path.basename(path)
         name, ok = QInputDialog.getText(self, "Rename", "New name:", text=old)
         name = name.strip()
         if not ok or not name or name == old:
             return
+        if not self._valid_paths([path],context):return
         try:
             os.rename(path, os.path.join(os.path.dirname(path), name))
         except OSError as err:
@@ -937,6 +1040,7 @@ class ExplorerWindow(QWidget):
         self._changed()
 
     def _delete(self):
+        context=dict(self._volume_context)
         targets = [path for _kind, path in self._selected() if not is_drive_root(path)]
         if not targets:
             return
@@ -945,10 +1049,23 @@ class ExplorerWindow(QWidget):
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No)
         if answer != QMessageBox.StandardButton.Yes:
             return
+        if not self._valid_paths(targets,context):return
         failed = [path for path in targets if not recycle(path)]
         if failed:
             QMessageBox.warning(self, "Delete", "Could not delete:\n" + "\n".join(failed))
         self._changed()
+
+    def _valid_paths(self,paths,context=None):
+        import devices
+        context=self._volume_context if context is None else context
+        for path in paths:
+            root=os.path.splitdrive(path or '')[0]+os.sep
+            match=next((value for namespace,value in context.items() if path and (path==namespace or path.startswith(namespace))),None)
+            if match and (not match[1] or match[0].startswith('legacy:') or devices.volume_identity(root)!=match[0]):
+                self._fail('This drive was disconnected or its letter changed. Refresh Explorer before using this item.');return False
+            if path and path.startswith('@'):
+                self._fail('This saved volume is offline.');return False
+        return True
 
     def _changed(self):
         """Reload now, and again once the watcher has seen the change."""
@@ -1010,12 +1127,17 @@ class MainWindow(QMainWindow):
 
         self.explorer_btn = QPushButton("Explorer")
         self.explorer_btn.clicked.connect(self._open_explorer)
+        self.refresh_drives_btn=QPushButton('↻')
+        self.refresh_drives_btn.setFixedWidth(42)
+        self.refresh_drives_btn.setToolTip('Refresh drives')
+        self.refresh_drives_btn.setAccessibleName('Refresh drives')
+        self.refresh_drives_btn.clicked.connect(self._refresh_devices)
         self.explorer = None
         self.about_btn = QPushButton("About")
         self.about_btn.clicked.connect(self._open_about)
         self.options_btn = QPushButton("Options")
         self.options_btn.clicked.connect(self._open_options)
-        outer.addWidget(TitleBar(self, left=[brand], right=[self.explorer_btn, self.options_btn, self.about_btn, self.pause_btn]))
+        outer.addWidget(TitleBar(self, left=[brand], right=[self.explorer_btn,self.refresh_drives_btn, self.options_btn, self.about_btn, self.pause_btn]))
 
         # Drive tiles share one full-width row and stretch to fit, so nothing scrolls.
         self.tiles = {}
@@ -1027,7 +1149,9 @@ class MainWindow(QMainWindow):
         cards.setSpacing(12)
         self.card_drives = Card("drives online")
         self.card_files = Card("files indexed")
-        self.card_size = Card("indexed size")
+        self.card_size = Card("online indexed")
+        self.card_size.value.setStyleSheet("font-size: 15pt;")
+        self.card_size.setToolTip("Indexed file size on connected drives / saved indexed file size across all drives, including offline drives. These are file sizes, not drive capacities.")
         self.card_today = Card("changes today")
         self.card_held = Card("waiting to apply")
         for card in (self.card_drives, self.card_files, self.card_size, self.card_today, self.card_held):
@@ -1055,12 +1179,16 @@ class MainWindow(QMainWindow):
         self._disks = {}
         self._limits = settings.load()
         self._smart_busy = False
+        self._health_generation = 0
         self._heat_levels = {}
         self._toasts = []
         self._smart_result.connect(self._store_smart)
         self.smart_timer = QTimer(self)
         self.smart_timer.timeout.connect(self._poll_smart)
-        self.smart_timer.start(60000)
+        from feature_ui import FeatureController
+        self.features=FeatureController(self,db_path)
+        if self._limits.get('health_enabled',True):self.smart_timer.start(60000)
+        else:smart.block('options')
         self._poll_smart()
         self.refresh()
 
@@ -1076,7 +1204,7 @@ class MainWindow(QMainWindow):
         self.drives_table = make_table(["Drive", "Status", "Files", "Size", "Last scan", "Last change", "Waiting", "Watch"])
         # Short columns keep a fixed width; the time and watch columns share the rest, so nothing scrolls.
         header = self.drives_table.horizontalHeader()
-        for col, width in ((0, 80), (1, 130), (2, 110), (3, 120), (6, 100)):
+        for col, width in ((0, 65), (1, 175), (2, 110), (3, 105), (6, 80)):
             header.setSectionResizeMode(col, QHeaderView.ResizeMode.Interactive)
             self.drives_table.setColumnWidth(col, width)
         for col in (4, 5, 7):
@@ -1096,7 +1224,7 @@ class MainWindow(QMainWindow):
         self.period.currentIndexChanged.connect(lambda _i: self._refresh_report())
         self.report_drive.currentIndexChanged.connect(lambda _i: self._refresh_report())
         self.report_table = make_table(["Folder", "Changes", "Written", "Freed", "Last change"])
-        fit_columns(self.report_table, [780, 110, 130, 130, 180])
+        self.report_table.configure_fit([780, 110, 130, 130, 180], 0)
         page = QWidget()
         layout = QVBoxLayout(page)
         layout.setContentsMargins(14, 14, 14, 14)
@@ -1119,7 +1247,7 @@ class MainWindow(QMainWindow):
         self.log_action.currentIndexChanged.connect(lambda _i: self._refresh_log())
         self.log_search.textChanged.connect(lambda _t: self._refresh_log())
         self.log_table = make_table(["Time", "Drive", "Path", "Change", "Size", "Action"])
-        fit_columns(self.log_table, [160, 80, 760, 130, 120])
+        self.log_table.configure_fit([170, 65, 760, 110, 110, 100], 2)
         page = QWidget()
         layout = QVBoxLayout(page)
         layout.setContentsMargins(14, 14, 14, 14)
@@ -1139,6 +1267,15 @@ class MainWindow(QMainWindow):
     def _open_explorer(self):
         if self.explorer is None:
             self.explorer = ExplorerWindow(self.con)
+            self.explorer.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+            def copy_menu(pos):
+                paths=[self.explorer.table.item(row,0).data(Qt.ItemDataRole.UserRole) for row in sorted({x.row() for x in self.explorer.table.selectedItems()})]
+                paths=[p[1] for p in paths if isinstance(p,(list,tuple)) and len(p)==2 and isinstance(p[1],str)]
+                if not paths:return
+                menu=QMenu(self.explorer);action=menu.addAction('Copy full path(s)')
+                action.triggered.connect(lambda:QApplication.clipboard().setText('\n'.join(paths)))
+                menu.exec(self.explorer.table.viewport().mapToGlobal(pos))
+            self.explorer.table.customContextMenuRequested.connect(copy_menu)
         self.explorer.show()
         self.explorer.load()
         self.explorer.raise_()
@@ -1163,6 +1300,7 @@ class MainWindow(QMainWindow):
             btn.setGraphicsEffect(glow)
 
     def _refresh_strip(self, snap):
+        snap={r:s for r,s in snap.items() if s['state']!='offline' and not r.startswith('@')}
         for root in [r for r in self.tiles if r not in snap]:
             tile = self.tiles.pop(root)
             self.strip.removeWidget(tile)
@@ -1176,29 +1314,64 @@ class MainWindow(QMainWindow):
                     lambda pos, r=root, t=tile: self._show_tile_menu(r, t.mapToGlobal(pos)))
                 self.tiles[root] = tile
                 self.strip.addWidget(tile)
-            self.tiles[root].update_info(snap[root]["state"])
+            self.tiles[root].update_info('released' if root in self.engine.released_roots else snap[root]["state"])
+            self.tiles[root].volume_id=snap[root].get('volume_id')
+            self.tiles[root].title.setText(f'{root[:2]} · {monitoring_label(root,snap[root],self.engine)}')
+            self.tiles[root].setToolTip(snap[root].get('message',''))
             disk = self._disks.get(root[:2])
             self.tiles[root].set_kind(drive_kind(disk))
             external = bool(disk) and disk.get("Bus") not in ("NVMe", "SATA", "RAID", "SAS")
             self.tiles[root].set_temperature(disk.get("Temperature") if disk else None, external, self._limits,
                                              disk.get("Health") if disk else None)
+            if not self._limits.get("health_enabled",True):
+                self.tiles[root].temp.setText("Health monitoring off")
+            elif snap[root]["state"] in ("offline","released","ejecting"):
+                self.tiles[root].temp.setText("No current readings")
 
     def _open_options(self):
-        dialog = OptionsDialog(self, self._limits)
-        if dialog.exec() == QDialog.DialogCode.Accepted:
-            settings.save(self._limits)
-            self.refresh()
+        self.features.options()
+
+    def _refresh_devices(self):
+        manager=self.features.manager
+        if manager is None:return
+        manager.refresh()
+        self.refresh_drives_btn.setEnabled(False)
+        if not hasattr(self,'_refresh_delay'):
+            self._refresh_delay=QTimer(self);self._refresh_delay.setSingleShot(True)
+            self._refresh_delay.timeout.connect(lambda:self.refresh_drives_btn.setEnabled(True))
+        self._refresh_delay.start(2000)
+        self.features.last_space=0
+        self._poll_smart()
+        self.refresh()
 
     def _open_drive(self, root):
-        disk = self._disks.get(root[:2])
+        shown=getattr(self.tiles.get(root),'volume_id',None)
+        if shown and shown!=self.engine.snapshot().get(root,{}).get('volume_id'):
+            self.refresh();return
+        disk = self._disks.get(root[:2]) if self._limits.get('health_enabled',True) and root not in self.engine.released_roots else None
         info = self.engine.snapshot().get(root, {})
         dialog = DriveDialog(self, root, disk, root[:2] in self._limits["tray_drives"], self._set_tray_drive,
                              root[:2] not in self._limits["unmonitored_drives"], self._set_monitored,
                              error_message=info.get("message", "") if info.get("state") == "error" else "",
                              on_retry=self.engine.retry_drive)
+        if not self._limits.get('health_enabled',True):
+            dialog.body.insertWidget(0,QLabel('Drive-health and temperature monitoring is disabled.'))
+        if hasattr(self,'features') and self.features.manager:
+            manager=self.features.manager
+            if root in manager.blocked:
+                resume=QPushButton('Resume monitoring');resume.clicked.connect(lambda:self.features.removal(root,resume=True));dialog.body.addWidget(resume)
+            else:
+                release=QPushButton('Release monitoring for removal');release.clicked.connect(lambda:self.features.removal(root,expected=shown));dialog.body.addWidget(release)
+                if manager.devices.get(root,{}).get('removable'):
+                    eject=QPushButton('Safely eject device…');eject.clicked.connect(lambda:self.features.removal(root,eject=True,expected=shown));dialog.body.addWidget(eject)
+            if self.engine.snapshot().get(root,{}).get('verified') and any(not v['verified'] for v in volumes.rows(self.con)):
+                link=QPushButton('Link saved drive…');link.clicked.connect(lambda:self.features.link_saved(root,expected=shown));dialog.body.addWidget(link)
         dialog.exec()
 
     def _show_tile_menu(self, root, global_pos):
+        shown=getattr(self.tiles.get(root),'volume_id',None)
+        if shown and shown!=self.engine.snapshot().get(root,{}).get('volume_id'):
+            self.refresh();return
         # Right-click on a drive tile: remove it from the tray and/or stop monitoring it.
         in_tray = root[:2] in self._limits["tray_drives"]
         monitored = root[:2] not in self._limits["unmonitored_drives"]
@@ -1210,6 +1383,21 @@ class MainWindow(QMainWindow):
         monitor_action = QAction("Stop monitoring" if monitored else "Start monitoring", menu)
         monitor_action.triggered.connect(lambda: self._set_monitored(root, not monitored))
         menu.addAction(monitor_action)
+        if hasattr(self,'features') and self.features.manager:
+            manager=self.features.manager
+            menu.addSeparator()
+            if root in manager.blocked:
+                resume=menu.addAction('Resume monitoring')
+                resume.triggered.connect(lambda:self.features.removal(root,resume=True))
+            else:
+                release=menu.addAction('Release monitoring for removal')
+                release.triggered.connect(lambda:self.features.removal(root,expected=shown))
+                if manager.devices.get(root,{}).get('removable'):
+                    eject=menu.addAction('Safely eject device…')
+                    eject.triggered.connect(lambda:self.features.removal(root,eject=True,expected=shown))
+            if self.engine.snapshot().get(root,{}).get('verified') and any(not v['verified'] for v in volumes.rows(self.con)):
+                link=menu.addAction('Link saved drive…')
+                link.triggered.connect(lambda:self.features.link_saved(root,expected=shown))
         menu.exec(global_pos)
 
     def _remove_from_tray(self, root):
@@ -1217,34 +1405,50 @@ class MainWindow(QMainWindow):
         self._set_tray_drive(root, False)
 
     def _set_tray_drive(self, root, enabled):
-        letters = [x for x in self._limits["tray_drives"] if x != root[:2]]
-        if enabled:
-            letters.append(root[:2])
-        self._limits["tray_drives"] = letters
-        settings.save(self._limits)
+        identity=self.engine.snapshot().get(root,{}).get('volume_id')
+        current=settings.set_drive_choice(root,'tray_drives',enabled,identity)
+        if current is None:return
+        self._limits=current
         self.drives_changed.emit()
 
     def _set_monitored(self, root, enabled):
-        letters = [x for x in self._limits["unmonitored_drives"] if x != root[:2]]
-        if not enabled:
-            letters.append(root[:2])
-        self._limits["unmonitored_drives"] = letters
-        settings.save(self._limits)
+        identity=self.engine.snapshot().get(root,{}).get('volume_id')
+        current=settings.set_drive_choice(root,'unmonitored_drives',not enabled,identity)
+        if current is None:return
+        self._limits=current
         self.drives_changed.emit()
 
     def _poll_smart(self):
         # PowerShell takes a moment, so it runs on a worker thread and the table only reads the last result.
-        if self._smart_busy:
+        manager=self.features.manager
+        suspended=bool(manager.blocked&manager.available) if manager else bool(self.engine.released_roots)
+        if self._smart_busy or not self._limits.get('health_enabled',True) or suspended:
             return
         self._smart_busy = True
+        generation=self._health_generation
+        mount_ids={r:m['id'] for r,m in self.engine.mounts.items()}
 
         def work():
-            disks = smart.letters_map()
-            self._smart_result.emit(disks)
+            try:disks = smart.letters_map()
+            except Exception:disks={}
+            self._smart_result.emit((generation,disks,mount_ids))
 
         threading.Thread(target=work, daemon=True).start()
 
     def _store_smart(self, disks):
+        if isinstance(disks,tuple):
+            generation,disks,*context=disks
+            if generation!=self._health_generation:
+                self._smart_busy=False
+                QTimer.singleShot(0,self._poll_smart)
+                return
+            if context:
+                captured=context[0]
+                disks={letter:disk for letter,disk in disks.items() if captured.get(letter+os.sep)==self.engine.mounts.get(letter+os.sep,{}).get('id') and self.engine._valid_mount(letter+os.sep)}
+        manager=self.features.manager
+        suspended=bool(manager.blocked&manager.available) if manager else bool(self.engine.released_roots)
+        if not self._limits.get('health_enabled',True) or suspended:
+            self._smart_busy=False;return
         self._disks = disks
         self._smart_busy = False
         self._check_heat(disks)
@@ -1252,18 +1456,22 @@ class MainWindow(QMainWindow):
 
     def _check_heat(self, disks):
         """Alert once each time a drive rises into warm or hot, not on every poll."""
-        rank = {"cool": 0, "warm": 1, "hot": 2}
+        from notifications import temperature_observation
+        if not self._limits.get('health_enabled',True):return
+        observed=set()
         for letter, disk in disks.items():
             celsius = disk.get("Temperature")
-            if celsius is None:
-                self._heat_levels.pop(letter, None)
-                continue
             external = disk.get("Bus") not in ("NVMe", "SATA", "RAID", "SAS")
-            level = settings.heat_class(celsius, external, self._limits)
-            previous = self._heat_levels.get(letter, "cool")
-            self._heat_levels[letter] = level
-            if level != "cool" and rank[level] > rank[previous]:
+            identity=disk.get('Identity') or letter
+            observed.add('heat:'+identity)
+            should_alert=temperature_observation(self.features.episodes,identity,celsius,
+                self._limits['external' if external else 'internal'],self._limits.get('alert_reset_hours',1),
+                self._limits.get('temperature_alerts',True))
+            if should_alert and celsius is not None:
+                level=settings.heat_class(celsius,external,self._limits)
                 self._show_alert(letter, level, celsius)
+        for key in list(self.features.episodes.cooling):
+            if key.startswith('heat:') and key not in observed:self.features.episodes.observe(key,None,False)
 
     def _show_alert(self, letter, level, celsius):
         color = RED if level == "hot" else ORANGE
@@ -1300,7 +1508,7 @@ class MainWindow(QMainWindow):
         self._refresh_cards(snap)
         self._refresh_strip(snap)
         self._refresh_drives(snap)
-        drives = sorted({root[:2] for root in snap})
+        drives = [(volumes.display_root(dict(s,namespace=root,present=s['state']!='offline')),s.get('volume_id') or root.rstrip('\\')) for root,s in sorted(snap.items())]
         sync_drive_combo(self.report_drive, drives)
         sync_drive_combo(self.log_drive, drives)
         index = self.tabs.currentIndex()
@@ -1308,23 +1516,33 @@ class MainWindow(QMainWindow):
             self._refresh_report()
         elif index == 2:
             self._refresh_log()
+        if self.engine.work_mode:
+            self.scan_status.setText('Game/work mode · heavy background work deferred · '+self.scan_status.text())
 
     def _refresh_cards(self, snap):
-        ready = [s for s in snap.values() if s["state"] in ("ready", "indexing")]
-        online = [s for s in snap.values() if s["state"] in ("ready", "indexing")]
+        ready = [s for s in snap.values() if (s['present'] if s.get('present') is not None else s['state'] in ('ready','indexing','unmonitored'))]
+        online = ready
         today = self.con.execute(
             "SELECT COALESCE(SUM(events), 0) FROM folder_daily WHERE day = ?", (date.today().isoformat(),)
         ).fetchone()[0]
         self.card_drives.set(f"{len(online)} of {len(snap)}")
         self.card_files.set(f"{sum(s['files'] for s in ready):,}")
-        self.card_size.set(human_bytes(sum(s["bytes"] for s in ready)))
+        connected_size = sum(s["bytes"] for s in ready)
+        saved_size = sum(s["bytes"] for s in snap.values())
+        self.card_size.set(indexed_size_text(connected_size, saved_size))
+        self.card_size.setToolTip(
+            f"Connected indexed: {connected_size:,} bytes\n"
+            f"All saved indexed: {saved_size:,} bytes\n"
+            f"Excluded from connected total: {human_bytes(saved_size-connected_size)} "
+            f"({saved_size-connected_size:,} bytes)\nThese are indexed file sizes, not drive capacities.")
         self.card_today.set(f"{today:,}")
         self.card_held.set(f"{sum(s['held'] for s in snap.values()):,}")
         scanning = [s for s in snap.values() if s["state"] == "indexing"]
         if scanning:
-            mode = "Fast startup scan" if any(s.get("scan_mode") == "startup" for s in scanning) else "Background scan"
+            mode = "Fast startup scan" if any(s.get("scan_mode") == "startup" for s in scanning) else "Recovery scan"
             checked = sum(s.get("scanned_files",0) for s in scanning)
-            self.scan_status.setText(f"{mode}  ·  {len(scanning)} drive(s)  ·  {checked:,} files checked")
+            reasons = '; '.join(dict.fromkeys(s.get('scan_reason', 'Reason unavailable') for s in scanning))
+            self.scan_status.setText(f"{mode}  ·  {len(scanning)} drive(s)  ·  {checked:,} files checked  ·  {reasons}")
         else:
             pending = sum(s.get("folder_updates",0) for s in snap.values())
             self.scan_status.setText("Monitoring paused" if self.engine.paused else
@@ -1336,19 +1554,19 @@ class MainWindow(QMainWindow):
         rows = []
         for root in sorted(snap):
             s = snap[root]
-            status = s["state"].upper()  # the error text lives in the tooltip so the column stays narrow
+            status = monitoring_label(root,s,self.engine)
             paused = root in self.engine.paused_drives
             status_cell = cell(status, colors.get(s["state"], TEXT))
             status_cell.setToolTip(s["message"] or status)
             rows.append([
-                cell(root[:2], TEXT),
+                cell(volumes.display_root(dict(s,namespace=root,present=s['state']!='offline')),TEXT),
                 status_cell,
                 SortItem(f"{s['files']:,}", s["files"]),
                 SortItem(human_bytes(s["bytes"]), s["bytes"]),
                 cell(stamp(s["last_scan"])),
                 cell(stamp(s["last_event"])),
                 SortItem(f"{s['held']:,}", s["held"]),
-                cell("Paused" if paused else "Watching", MUTED if paused else NEON),
+                cell('Offline' if s['state']=='offline' else 'Not monitored' if s['state']=='unmonitored' else 'Released' if root in self.engine.released_roots else 'Paused' if paused or self.engine.paused else 'Watching', MUTED if paused else NEON),
             ])
         fill(self.drives_table, rows)
 
@@ -1359,13 +1577,15 @@ class MainWindow(QMainWindow):
                "WHERE day >= ?")
         args = [storage.day_start(days)]
         if drive:
-            sql += " AND drive = ?"
-            args.append(drive)
+            identity=storage.filter_identity(self.con,drive)
+            sql += ' AND volume_id=?' if identity else ' AND drive=?'
+            args.append(identity or storage.filter_root(self.con,drive).rstrip('\\'))
         sql += " GROUP BY folder ORDER BY SUM(added) + SUM(freed) DESC LIMIT 300"
         rows = []
+        metadata=volumes.rows(self.con)
         for folder, events, added, freed, last in self.con.execute(sql, args).fetchall():
             rows.append([
-                cell(folder, TEXT),
+                cell(volumes.display_path(folder,metadata), TEXT),
                 SortItem(f"{events:,}", events),
                 SortItem(human_bytes(added), added),
                 SortItem(human_bytes(freed), freed),
@@ -1377,12 +1597,14 @@ class MainWindow(QMainWindow):
         drive = self.log_drive.currentData()
         action = self.log_action.currentData()
         text = self.log_search.text().strip()
-        sql = "SELECT ts, path, action, delta, size FROM file_log WHERE 1 = 1"
+        sql = "SELECT ts,path,action,delta,size,observed_path,legacy_unverified,observed_root,volume_id FROM file_log WHERE 1=1"
         args = []
         if drive:
-            lo, hi = storage.drive_range(drive + "\\")
-            sql += " AND path >= ? AND path < ?"
-            args += [lo, hi]
+            identity=storage.filter_identity(self.con,drive)
+            if identity:sql+=' AND volume_id=?';args.append(identity)
+            else:
+                lo, hi = storage.drive_range(storage.filter_root(self.con,drive))
+                sql += ' AND path >= ? AND path < ?';args += [lo,hi]
         if action:
             sql += " AND action = ?"
             args.append(action)
@@ -1392,11 +1614,15 @@ class MainWindow(QMainWindow):
         sql += " ORDER BY id DESC LIMIT 500"
         colors = {"added": NEON, "changed": TEXT, "removed": ORANGE}
         rows = []
-        for ts, path, act, delta, _size in self.con.execute(sql, args).fetchall():
+        metadata=volumes.rows(self.con)
+        for ts,path,act,delta,_size,observed,unverified,observed_root,identity in self.con.execute(sql,args).fetchall():
+            shown=volumes.display_path(path,metadata)
+            path_cell=cell(shown,TEXT)
+            path_cell.setToolTip(shown+'\nRecorded as: '+volumes.original_path(path,observed,observed_root,identity,metadata)+('\nHistorical drive identity unverified' if unverified else ''))
             rows.append([
                 cell(stamp(ts)),
-                cell(path[:2], TEXT),
-                cell(path, TEXT),
+                cell(shown.split('\\',1)[0], TEXT),
+                path_cell,
                 SortItem(signed_bytes(delta), delta),
                 SortItem(human_bytes(_size), _size),
                 cell(act.capitalize(), colors.get(act, TEXT)),

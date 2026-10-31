@@ -5,6 +5,29 @@ Counters such as temperature need an elevated process. Missing values come back 
 
 import json
 import subprocess
+import threading
+
+_QUERY_LOCK=threading.Lock()
+_BLOCKS=set()
+_PROCESS=None
+_IDLE=threading.Event();_IDLE.set()
+
+
+def block(reason):
+    with _QUERY_LOCK:
+        _BLOCKS.add(reason)
+        process=_PROCESS
+        if process is not None and process.poll() is None:
+            try:process.terminate()
+            except OSError:pass
+
+
+def unblock(reason):
+    with _QUERY_LOCK:_BLOCKS.discard(reason)
+
+
+def wait_idle(timeout):
+    return _IDLE.wait(timeout)
 
 _SCRIPT = r"""
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
@@ -42,6 +65,7 @@ $out = foreach ($d in Get-PhysicalDisk) {
     }
     [pscustomobject]@{
         Number      = $d.DeviceId
+        Identity    = [string]$d.UniqueId
         Name        = $d.FriendlyName
         Bus         = [string]$d.BusType
         Media       = [string]$d.MediaType
@@ -80,16 +104,30 @@ def ata_temperature(data):
 
 def read_disks() -> list:
     """Return one dict per physical disk. An empty list means the query failed."""
+    global _PROCESS
+    process=None;started=False
     try:
-        result = subprocess.run(
+        with _QUERY_LOCK:
+            if _BLOCKS or _PROCESS is not None:return []
+            started=True
+            _IDLE.clear()
+            process = _PROCESS = subprocess.Popen(
             ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", _SCRIPT],
-            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60, creationflags=0x08000040)  # CREATE_NO_WINDOW
+            stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,encoding='utf-8',errors='replace',creationflags=0x08000040)
+        stdout,stderr=process.communicate(timeout=60)
     except (OSError, subprocess.TimeoutExpired):
+        if process is not None:
+            try:process.kill();process.communicate(timeout=5)
+            except (OSError,subprocess.TimeoutExpired):pass
         return []
-    if result.returncode != 0 or not result.stdout.strip():
+    finally:
+        if process is not None:
+            with _QUERY_LOCK:_PROCESS=None;_IDLE.set()
+        elif started:_IDLE.set()
+    if process.returncode != 0 or not stdout.strip():
         return []
     try:
-        data = json.loads(result.stdout)
+        data = json.loads(stdout)
     except json.JSONDecodeError:
         return []
     records = data if isinstance(data, list) else [data]

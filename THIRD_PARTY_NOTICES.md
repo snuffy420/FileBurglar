@@ -5,6 +5,7 @@ File Burglar application code and original graphics are GPL-3.0-or-later. Third-
 | Component | Release build version | License / source |
 | --- | --- | --- |
 | CPython | 3.12.6, x64 | Python/PSF license; https://www.python.org/downloads/release/python-3126/ |
+| OpenSSL (Python HTTPS runtime) | 3.0.15 | Apache-2.0; https://github.com/openssl/openssl/tree/openssl-3.0.15 |
 | SQLite | Supplied by the bundled Python runtime | Public domain; https://www.sqlite.org/copyright.html |
 | PyQt6 | 6.11.0 | GPLv3; https://www.riverbankcomputing.com/software/pyqt/download |
 | Qt runtime | 6.11.2 | LGPLv3/GPL component terms; https://download.qt.io/archive/qt/6.11/6.11.2/ |

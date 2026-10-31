@@ -15,13 +15,24 @@ from datetime import date, timedelta
 
 import storage
 import diagnostics
+import volumes
+import settings
+import json
 from folder_updates import FolderUpdater
 from indexer import Indexer, lower_thread_priority
 
 BATCH_ROWS = 500
 PRUNE_EVERY = 3600
+PRUNE_BACKLOG_EVERY = 5  # seconds between bounded prune chunks while old history remains
 LOG_DAYS = 30
 DAILY_DAYS = 365
+# Wait briefly for a burst of notifications so a file rewritten many times per
+# second is checked once. Keeps CPU and disk work low on busy drives.
+EVENT_SETTLE = 0.5
+MERGE_PATH_LIMIT = 20000
+# Minimum seconds between whole-drive recovery scans caused by lost Windows
+# notifications. Overflows during the cooldown queue one deferred rescan.
+RECOVERY_COOLDOWN = 15 * 60
 
 
 class Engine(threading.Thread):
@@ -39,7 +50,17 @@ class Engine(threading.Thread):
         self.indexers = {}  # root -> running Indexer
         self.scan_threads = set()
         self.rescan_pending = set()
+        self.recovery_after = {}  # root -> monotonic time when another recovery scan may start
         self.startup_roots = set()
+        self.work_mode = False
+        self.released_roots = set()
+        self.release_guard = threading.RLock()
+        self.notices = queue.SimpleQueue()
+        self.scan_baselines = {}
+        self.reconnect_pending={}
+        self.mounts={}
+        self.invalid_tokens=set()
+        self.pending_mounts={}
         self.folder_updater = FolderUpdater(db_path, self._can_update_folder,
                                             lambda root,error: self._control("folder_done",root,error))
         self.paused = False
@@ -48,19 +69,24 @@ class Engine(threading.Thread):
         self.last_prune = 0.0
         con = storage.connect(db_path)
         try:
-            for root, files, size, last in con.execute("SELECT root,files,bytes,last_scan FROM drives"):
-                self._set(root, files=files, bytes=size, last_scan=last)
+            con.execute('UPDATE volumes SET present=0');con.commit()
+            self._reload_volumes(con)
+            metadata=volumes.rows(con)
+            if metadata:settings.configure_volumes(metadata)
         finally:
             con.close()
 
     # Called from watcher, drive and indexer threads. They only enqueue.
-    def on_events(self, root, events):
+    def on_events(self, root, events, token=None):
+        if token in self.invalid_tokens:return
+        if token and token not in (self.mounts.get(root,{}).get('token'),self.pending_mounts.get(root)):return
+        if root in self.released_roots:return
         # Filter database/WAL writes BEFORE the bounded queue, not after overflow.
-        events = [(kind,path) for kind,path in events if not storage.is_own_path(path)]
+        events = [(kind,path) for kind,path in events if not storage.is_ignored_path(path)]
         if not events:
             return
         try:
-            self.inbox.put_nowait(("events", root, events))
+            self.inbox.put_nowait(("events", root, (token,events) if token else events))
         except queue.Full:
             with self.drop_lock:
                 self.dropped_roots.add(root)
@@ -73,10 +99,11 @@ class Engine(threading.Thread):
         self.controls.put((kind, root, payload))
         self.wake.set()
 
-    def on_overflow(self, root):
-        self._control("overflow", root)
+    def on_overflow(self, root,token=None):
+        self._control("overflow", root,token)
 
     def on_drive(self, root, state, message=""):
+        if state=='online' and isinstance(message,dict) and message.get('token'):self.pending_mounts[root]=message['token']
         self._control("drive", root, (state, message))
 
     def on_status(self, root, state, message=""):
@@ -90,6 +117,112 @@ class Engine(threading.Thread):
 
     def retry_drive(self, root):
         self._control("retry", root)
+
+    def set_work_mode(self,value):
+        self._control('work_mode',payload=bool(value))
+
+    def configure_exclusions(self,paths,previous=()):
+        self._control('exclusions',payload=(list(paths),list(previous)))
+
+    def link_saved_volume(self,source,destination):
+        from concurrent.futures import Future
+        future=Future();self._control('link_volume',payload=(source,destination,future));return future
+
+    def release(self,roots,timeout=3):
+        """Block new I/O immediately and acknowledge actual worker completion."""
+        deadline=time.monotonic()+timeout
+        self.request_release(roots)
+        while time.monotonic()<deadline:
+            active=self.folder_updater.active
+            busy=any(i.root in roots for i in self.indexers.values()) or bool(active and active[0] in roots)
+            if not busy:
+                # Acquiring the write lock ensures event processing committed and
+                # released its filesystem operations. Never hold it while joining.
+                remaining=max(0,deadline-time.monotonic())
+                if storage.WRITE_LOCK.acquire(timeout=remaining):
+                    storage.WRITE_LOCK.release()
+                    for root in roots:self._set(root,state='released',message='Released for removal')
+                    return True
+            time.sleep(.02)
+        return False
+
+    def request_release(self,roots):
+        with self.release_guard:
+            self.released_roots.update(roots)
+            for root,indexer in list(self.indexers.items()):
+                if root in roots:indexer.stop_event.set()
+            self.folder_updater.wake()
+
+    def resume_released(self,roots):
+        self.released_roots.difference_update(roots)
+
+    def _io_allowed(self,root):
+        return not self.stop_flag and root not in self.released_roots
+
+    def invalidate_mount(self,root,token=None):
+        if token:
+            self.invalid_tokens.add(token)
+            if len(self.invalid_tokens)>256:self.invalid_tokens=set(list(self.invalid_tokens)[-128:])
+        if token is None or self.mounts.get(root,{}).get('token')==token:self.request_release({root})
+
+    def _valid_mount(self,root,token=None):
+        if token in self.invalid_tokens:return False
+        mount=self.mounts.get(root)
+        if not mount:return token is None  # unmanaged synthetic fixtures / legacy APIs
+        if token and token!=mount.get('token'):return False
+        import devices
+        return devices.volume_identity(root)==mount['id']
+
+    def _reload_volumes(self,con):
+        metadata={v['namespace']:v for v in volumes.rows(con)}
+        by_id={s.get('volume_id'):s for s in self.state.values() if s.get('volume_id')}
+        fresh={}
+        for root,count,size,last,ident in con.execute('SELECT root,files,bytes,last_scan,volume_id FROM drives'):
+            info=dict(by_id.get(ident,self.state.get(root,{})))
+            info.update(files=count,bytes=size,last_scan=last,volume_id=ident,
+                        last_root=metadata.get(root,{}).get('last_root',root),label=metadata.get(root,{}).get('label',''),
+                        verified=bool(metadata.get(root,{}).get('verified',True)))
+            info['present']=bool(metadata[root]['present']) if root in metadata else None
+            info.setdefault('state','offline');info.setdefault('message','');info.setdefault('last_event',0);info.setdefault('held',0)
+            if not metadata.get(root,{}).get('present',False):info['state']='offline'
+            fresh[root]=info
+        with self.lock:self.state=fresh
+
+    def _bind_volume(self,con,root,info):
+        ident=info.get('identity','');token=info.get('token')
+        if token in self.invalid_tokens:return False
+        if not ident:
+            self._set(root,state='error',message='Cannot identify the volume; saved drive data was not associated.');return False
+        old=con.execute('SELECT namespace,present FROM volumes WHERE id=?',(ident,)).fetchone()
+        if old and old[0]!=root and old[0] in self.indexers:
+            self.indexers[old[0]].stop_event.set()
+            self._set(root,state='error',message='Previous mount is still closing. Refresh drives to retry.');return False
+        affected={root}
+        if old:affected.add(old[0])
+        for path in affected:
+            self.held.pop(path,None);self.rescan_pending.discard(path)
+            self.folder_updater.discard_root(path)
+        previous_metadata=volumes.rows(con)
+        volumes.bind(con,ident,root,info.get('label',''))
+        current_metadata={v['id']:v for v in volumes.rows(con)}
+        relocated=[]
+        for path in storage.BASELINE_PATHS:
+            owner=next((v for v in previous_metadata if path.lower().startswith(v['namespace'].lower())),None)
+            if owner and owner['id'] in current_metadata:
+                path=current_metadata[owner['id']]['namespace']+path[len(owner['namespace']):]
+            relocated.append(os.path.normcase(path))
+        storage.BASELINE_PATHS=tuple(relocated)
+        self.mounts[root]=dict(id=ident,token=token)
+        for previous,mount in list(self.mounts.items()):
+            if previous!=root and mount['id']==ident:self.mounts.pop(previous,None)
+        self.released_roots.discard(root)
+        self._reload_volumes(con)
+        settings.configure_volumes(volumes.rows(con))
+        con.execute("INSERT INTO app_meta VALUES('exclusions',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",(json.dumps(storage.EXCLUSIONS),))
+        self.notices.put(('mounts',root,None))
+        if old and not old[1] and ident in self.startup_roots:
+            self.reconnect_pending[root]=con.execute('SELECT COALESCE(MAX(id),0) FROM file_log').fetchone()[0]
+        return True
 
     def stop(self):
         self.stop_flag = True
@@ -119,6 +252,7 @@ class Engine(threading.Thread):
             while not self.stop_flag:
                 self.wake.wait(timeout=2.0)
                 self.wake.clear()
+                self._settle()
                 with self.drop_lock:
                     dropped, self.dropped_roots = self.dropped_roots, set()
                 # Known events dropped by backpressure are recovered by folder
@@ -133,18 +267,10 @@ class Engine(threading.Thread):
                         except queue.Empty:
                             break
                         self._handle(con, control, rows)
-                    for _ in range(500):
-                        if self.stop_flag:
-                            break
-                        try:
-                            item = self.inbox.get_nowait()
-                        except queue.Empty:
-                            break
-                        self._handle(con, item, rows)
-                        if len(rows) >= BATCH_ROWS:
-                            self._flush(con, rows)
+                    self._drain_inbox(con, rows)
                     self._flush(con, rows)
                     self._maybe_prune(con)
+                    self._start_deferred(con,rows)
                 if not self.inbox.empty() or not self.controls.empty():
                     self.wake.set()
         finally:
@@ -161,6 +287,51 @@ class Engine(threading.Thread):
             for thread in threads:
                 thread.join(timeout=max(0, deadline - time.monotonic()))
             con.close()
+
+    def _settle(self):
+        """Let a notification burst finish arriving before it is processed."""
+        if EVENT_SETTLE <= 0 or self.inbox.empty():
+            return
+        deadline = time.monotonic() + EVENT_SETTLE
+        while (not self.stop_flag and self.controls.empty() and not self.inbox.full()
+               and time.monotonic() < deadline):
+            time.sleep(0.05)
+
+    def _drain_inbox(self, con, rows):
+        """Handle queued items, merging event batches so each path is checked once."""
+        pending = {}  # (root, token) -> {path: kind}
+        merged = 0
+
+        def apply_pending():
+            for (root, token), paths in pending.items():
+                events = [(kind, path) for path, kind in paths.items()]
+                self._handle(con, ("events", root, (token, events) if token else events), rows)
+                if len(rows) >= BATCH_ROWS:
+                    self._flush(con, rows)
+            pending.clear()
+
+        for _ in range(500):
+            if self.stop_flag:
+                break
+            try:
+                item = self.inbox.get_nowait()
+            except queue.Empty:
+                break
+            if item[0] != "events":
+                self._handle(con, item, rows)
+                continue
+            payload = item[2]
+            token, events = payload if isinstance(payload, tuple) else (None, payload)
+            paths = pending.setdefault((item[1], token), {})
+            for kind, path in events:
+                paths[path] = kind
+            merged += len(events)
+            if merged >= MERGE_PATH_LIMIT:
+                apply_pending()
+                merged = 0
+            if len(rows) >= BATCH_ROWS:
+                self._flush(con, rows)
+        apply_pending()
 
     def _flush(self, con, rows):
         # Always commit, even with no log rows: folder and file writes made while handling
@@ -192,17 +363,86 @@ class Engine(threading.Thread):
     def _handle(self, con, item, rows):
         kind, root, payload = item
         if kind == "events":
+            if isinstance(payload,tuple):
+                token,payload=payload
+                if not self._valid_mount(root,token):return
             self._events(con, root, payload, rows)
         elif kind == "overflow":
+            if not self._valid_mount(root,payload):return
             self._overflow(root)
+        elif kind == 'work_mode':
+            self.work_mode=payload
+            self.folder_updater.wake()
+            if not payload:
+                for drive in list(self.held):
+                    if self._can_update_folder(drive):self._replay_held(con,drive,rows)
+        elif kind=='link_volume':
+            source,destination,future=payload
+            try:
+                mounted=con.execute('SELECT namespace FROM volumes WHERE id=?',(destination,)).fetchone()
+                if not mounted or self.mounts.get(mounted[0],{}).get('id')!=destination or not self._valid_mount(mounted[0]):
+                    raise ValueError('The drive assignment changed. Refresh and select the drive again.')
+                volumes.link_legacy(con,source,destination)
+                settings.link_preferences(source,destination)
+                self._reload_volumes(con);settings.configure_volumes(volumes.rows(con))
+                storage.prune_exclusions(con);self._reload_volumes(con)
+                self.notices.put(('mounts','',None));future.set_result(True)
+            except Exception as error:future.set_exception(error)
+        elif kind == 'exclusions':
+            paths,previous=payload
+            storage.set_exclusions(paths)
+            storage.prune_exclusions(con)
+            self.folder_updater.discard_excluded()
+            for drive,held in self.held.items():
+                self.held[drive]={p for p in held if not storage.is_excluded_path(p)}
+            for path in previous:
+                if not storage.is_excluded_path(path):
+                    drive=os.path.splitdrive(path)[0]+os.sep
+                    self.folder_updater.enqueue(drive,path,True)
+            for drive,count,size in con.execute('SELECT root,files,bytes FROM drives'):
+                self._set(drive,files=count,bytes=size)
         elif kind == "drive":
+            identity_info=payload[1]
+            if isinstance(identity_info,dict) and identity_info.get('token'):
+                if payload[0]=='online':
+                    try:
+                        if not self._bind_volume(con,root,identity_info):return
+                    except Exception as error:
+                        diagnostics.report(self.db_path,'volume identity',root,str(error))
+                        self._set(root,state='offline',message='Volume association failed: '+str(error))
+                        self.notices.put(('identity_error',root,str(error)));return
+                    finally:
+                        if self.pending_mounts.get(root)==identity_info['token']:self.pending_mounts.pop(root,None)
+                    if identity_info.get('monitor') is False:
+                        self._set(root,state='unmonitored',message='Connected; file monitoring is disabled',present=True)
+                        return
+                elif payload[0]=='offline':
+                    if self.mounts.get(root,{}).get('token')!=identity_info['token']:return
+                    volumes.offline(con,self.mounts[root]['id'])
+                    settings.configure_volumes(volumes.rows(con))
+                    con.execute("INSERT INTO app_meta VALUES('exclusions',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",(json.dumps(storage.EXCLUSIONS),))
+                    self.notices.put(('mounts',root,None))
+                self._drive(root,*payload)
+                return
+            identity=identity_info.get('identity','') if isinstance(identity_info,dict) else identity_info
+            reconnected=identity_info.get('reconnected',False) if isinstance(identity_info,dict) else True
+            if payload[0]=='online' and identity:
+                old=con.execute('SELECT identity FROM volume_identity WHERE root=?',(root,)).fetchone()
+                if old and old[0]!=identity:
+                    # Different media at the same letter gets a baseline, not
+                    # fictional deletion/addition activity against the old disk.
+                    con.execute('UPDATE drives SET baselined=0 WHERE root=?',(root,))
+                if reconnected and old and old[0]==identity and self.state.get(root,{}).get('state') in ('offline','released') and root in self.startup_roots:
+                    self.reconnect_pending[root]=con.execute('SELECT COALESCE(MAX(id),0) FROM file_log').fetchone()[0]
+                con.execute('INSERT INTO volume_identity VALUES(?,?) ON CONFLICT(root) DO UPDATE SET identity=excluded.identity',(root,identity))
             self._drive(root, *payload)
         elif kind == "status":
             self._status(con, root, *payload)
         elif kind == "progress":
             indexer, count, size, initial = payload
             if self.indexers.get(root) is indexer:
-                info = dict(message=f"{'Fast startup scan' if indexer.fast_mode else 'Background scan'}: {count:,} files checked",
+                reason = self.state.get(root, {}).get('scan_reason', '')
+                info = dict(message=f"{'Fast startup scan' if indexer.fast_mode else 'Recovery scan'}: {count:,} files checked; {reason}",
                             scanned_files=count, scanned_bytes=size)
                 if initial:
                     info.update(files=count, bytes=size)
@@ -216,7 +456,7 @@ class Engine(threading.Thread):
             elif self._can_update_folder(root):
                 self._replay_held(con,root,rows)
         elif kind == "retry":
-            self._start_index(root, fast_startup=self.state.get(root, {}).get("scan_mode") == "startup")
+            self._start_index(root, fast_startup=self.state.get(root, {}).get("scan_mode") == "startup", reason="Manual retry")
         elif kind == "index_status":
             indexer, state, message = payload
             if self.indexers.get(root) is indexer:
@@ -227,8 +467,18 @@ class Engine(threading.Thread):
             self._drive_pause(con, root, payload, rows)
 
     def _can_update_folder(self, root):
-        return (not self.stop_flag and not self.paused and root not in self.paused_drives
-                and self.state.get(root,{}).get("state") == "ready")
+        return (self._io_allowed(root) and not self.paused and not self.work_mode and root not in self.paused_drives
+                and self.state.get(root,{}).get("state") == "ready" and self._valid_mount(root))
+
+    def _recovery_waiting(self, root):
+        return time.monotonic() < self.recovery_after.get(root, 0)
+
+    def _start_deferred(self,con,rows):
+        if self.work_mode or self.paused:return
+        for root in list(self.rescan_pending):
+            if self._can_update_folder(root) and not self._recovery_waiting(root):
+                self.rescan_pending.discard(root)
+                self._start_index(root,reason='Deferred recovery after lost notifications')
 
     def _hold_paths(self, root, paths):
         held = self.held.setdefault(root,set())
@@ -240,10 +490,23 @@ class Engine(threading.Thread):
         self._set(root)
 
     def _events(self, con, root, events, rows):
+        if not self._valid_mount(root):return
+        start=len(rows)
+        if not con.in_transaction:con.execute('BEGIN')
+        con.execute('SAVEPOINT live_volume')
+        try:
+            self._events_checked(con,root,events,rows)
+            if not self._valid_mount(root):
+                con.execute('ROLLBACK TO live_volume');del rows[start:]
+                self.invalidate_mount(root,self.mounts.get(root,{}).get('token'))
+        finally:con.execute('RELEASE live_volume')
+
+    def _events_checked(self, con, root, events, rows):
+        if not self._io_allowed(root):return
         info = self.state.get(root,{})
         self._set(root,last_event=time.time())
-        paths = {path for _kind,path in events if not storage.is_own_path(path)}
-        if self.paused or root in self.paused_drives or info.get("state") != "ready":
+        paths = {path for _kind,path in events if not storage.is_ignored_path(path)}
+        if self.paused or self.work_mode or root in self.paused_drives or info.get("state") != "ready":
             self._hold_paths(root,paths)
             return
         held = {path for path in paths if self.folder_updater.covers(root,path)}
@@ -254,23 +517,31 @@ class Engine(threading.Thread):
             self._apply_path(con,path,gen,rows)
 
     def _overflow(self, root):
-        if self.state.get(root, {}).get("state") == "offline":
+        if not self._io_allowed(root) or self.state.get(root, {}).get("state") == "offline":
             return
-        if self.paused or root in self.paused_drives:
+        if self.paused or self.work_mode or root in self.paused_drives:
             self.rescan_pending.add(root)
+            self._set(root,message='Recovery deferred while paused or in game/work mode')
             return
         # Some changes were lost, so reconcile the whole drive again.
         if self.state.get(root, {}).get("state") == "indexing":
             self.rescan_pending.add(root)
+        elif self._recovery_waiting(root):
+            # Busy drives can overflow repeatedly; one queued rescan covers them all.
+            self.rescan_pending.add(root)
+            self._set(root, message="Recovery scan queued (lost notifications)")
         else:
-            self._start_index(root)
+            self._start_index(root, reason="Windows change notifications were lost")
 
     def _drive(self, root, state, message):
+        if state=='online' and not self._io_allowed(root):return
         if state == "online":
-            startup = root not in self.startup_roots
-            self.startup_roots.add(root)
+            identity=self.mounts.get(root,{}).get('id',root)
+            startup = identity not in self.startup_roots
+            self.startup_roots.add(identity)
             if root not in self.indexers:
-                self._start_index(root, fast_startup=startup)
+                self._start_index(root, fast_startup=startup,
+                                  reason="Application startup" if startup else "Drive or watcher reconnected")
         elif state == "offline":
             indexer = self.indexers.pop(root, None)
             if indexer:
@@ -279,7 +550,7 @@ class Engine(threading.Thread):
             self.rescan_pending.discard(root)
             with self.drop_lock:
                 self.dropped_roots.discard(root)
-            self._set(root, state="offline", message="")
+            self._set(root, state="offline", message="",present=False)
         else:
             diagnostics.report(self.db_path, "watcher", root, message)
             self._set(root, state="error", message=message)
@@ -288,8 +559,10 @@ class Engine(threading.Thread):
         if root not in self.indexers:
             return
         if state == "indexing":
-            self._set(root, state="indexing", message="")
+            self._set(root, state="indexing")
             return
+        diagnostics.report(self.db_path, "scan", root,
+                           f"{state}: {self.state.get(root, {}).get('scan_reason', '')}; {message}", scan=True)
         if state == "error":
             self._set(root, state="error", message=message)
             self.indexers.pop(root, None)
@@ -299,11 +572,24 @@ class Engine(threading.Thread):
             return
         row = con.execute("SELECT files, bytes, last_scan FROM drives WHERE root = ?", (root,)).fetchone()
         files, size, last = row if row else (0, 0, 0.0)
-        self._set(root, state="ready", message="", files=files, bytes=size, last_scan=last)
-        if root in self.rescan_pending and not self.paused and root not in self.paused_drives:
+        storage.completed_baseline(root)
+        if root in self.reconnect_pending and state=='ready':
+            after=self.reconnect_pending.pop(root)
+            lo,hi=storage.drive_range(root)
+            added,removed,changed,delta=con.execute(
+                "SELECT COALESCE(SUM(action='added'),0),COALESCE(SUM(action='removed'),0),"
+                "COALESCE(SUM(action='changed'),0),COALESCE(SUM(delta),0) FROM file_log WHERE id>? AND path>=? AND path<?",
+                (after,lo,hi)).fetchone()
+            self.notices.put(('reconnect',root,(added,removed,changed,delta)))
+        self._set(root, state="released" if root in self.released_roots else "ready", message="", files=files, bytes=size, last_scan=last)
+        if state == "ready":
+            self.recovery_after[root] = time.monotonic() + RECOVERY_COOLDOWN
+        if root in self.rescan_pending and not self.paused and root not in self.paused_drives and not self._recovery_waiting(root):
             self.rescan_pending.discard(root)
-            self._start_index(root)
+            self._start_index(root, reason="Notifications lost during the previous scan")
             return
+        if root in self.rescan_pending:
+            self._set(root, message="Recovery scan queued (lost notifications)")
         if not self.paused and root not in self.paused_drives:
             self._replay_held(con, root)
         self.folder_updater.wake()
@@ -327,14 +613,15 @@ class Engine(threading.Thread):
                     self._replay_held(con, root, rows)
 
     def _replay_held(self, con, root, rows=None):
+        if self.work_mode or not self._io_allowed(root):return
         paths = self.held.pop(root, set())
         deferred = {path for path in paths if self.folder_updater.covers(root,path)}
         if deferred:
             self.held[root] = deferred
             paths -= deferred
-        if root in self.rescan_pending:
+        if root in self.rescan_pending and not self._recovery_waiting(root):
             self.rescan_pending.discard(root)
-            self._start_index(root)
+            self._start_index(root, reason="Deferred recovery after lost notifications")
             return
         if not paths:
             return
@@ -345,10 +632,22 @@ class Engine(threading.Thread):
         self._flush(con, rows)
         self._set(root)
 
-    def _start_index(self, root, fast_startup=False):
-        if self.stop_flag or root in self.indexers:
+    def _start_index(self, root, fast_startup=False, reason=None):
+        with self.release_guard:
+            return self._launch_index(root,fast_startup,reason)
+
+    def _launch_index(self, root, fast_startup=False, reason=None):
+        if not self._io_allowed(root) or root in self.indexers:
+            return
+        if self.work_mode and not fast_startup:
+            self.rescan_pending.add(root)
+            self._set(root,state='ready',message='Recovery deferred in game/work mode')
             return
         indexer = Indexer(self.db_path, root, fast_startup=fast_startup)
+        expected=self.mounts.get(root,{}).copy()
+        indexer.guard_check=lambda:self._valid_mount(root,expected.get('token')) and self.mounts.get(root,{})==expected
+        reason = reason or ("Application startup" if fast_startup else "Recovery requested")
+        diagnostics.report(self.db_path, "scan", root, "started: " + reason, scan=True)
         def progress(count, size, initial):
             try:
                 self.inbox.put_nowait(("progress", root, (indexer, count, size, initial)))
@@ -356,10 +655,10 @@ class Engine(threading.Thread):
             except queue.Full:
                 pass
         indexer.on_progress = progress
-        indexer.pause_check = lambda: self.paused or root in self.paused_drives
+        indexer.pause_check = lambda: self.paused or root in self.paused_drives or (self.work_mode and not fast_startup)
         indexer.on_status = lambda r, state, message="": self._post_index_status(indexer, state, message)
         self.indexers[root] = indexer
-        self._set(root, state="indexing", message="Fast startup scan" if fast_startup else "Background scan",
+        self._set(root, state="indexing", message=reason, scan_reason=reason,
                   scan_mode="startup" if fast_startup else "background", scanned_files=0, scanned_bytes=0)
         thread = threading.Thread(target=self._run_index, args=(indexer,),
                                   name=f"fb-index-{root[:1]}", daemon=True)
@@ -390,6 +689,8 @@ class Engine(threading.Thread):
         return row[0] if row else None
 
     def _apply_path(self, con, path, gen, rows):
+        root=os.path.splitdrive(path)[0]+os.sep
+        if not self._io_allowed(root) or storage.is_excluded_path(path):return
         ts = time.time()
         if os.path.islink(path) or os.path.isjunction(path):
             return
@@ -442,11 +743,15 @@ class Engine(threading.Thread):
             con.execute("DELETE FROM folders WHERE id = ?", (fid,))
 
     def _maybe_prune(self, con):
+        """Trim history in bounded chunks so the write lock is never held for long."""
         now = time.time()
         if now - self.last_prune < PRUNE_EVERY:
             return
-        self.last_prune = now
-        con.execute("DELETE FROM file_log WHERE ts < ?", (now - LOG_DAYS * 86400,))
+        more = storage.prune_log(con, LOG_DAYS * 86400)
         cutoff = (date.today() - timedelta(days=DAILY_DAYS)).isoformat()
         con.execute("DELETE FROM folder_daily WHERE day < ?", (cutoff,))
         con.commit()
+        storage.release_free_space(con)
+        con.commit()
+        # A large backlog (for example after upgrading) continues in a few seconds.
+        self.last_prune = now - PRUNE_EVERY + PRUNE_BACKLOG_EVERY if more else now

@@ -2,7 +2,7 @@
 #error PayloadDir must point to the verified application payload.
 #endif
 #ifndef BuildVersion
-#define BuildVersion "1.4.5"
+#define BuildVersion "1.5.4"
 #endif
 #define SourceRoot AddBackslash(SourcePath) + ".."
 [Setup]

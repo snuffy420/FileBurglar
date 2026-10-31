@@ -110,7 +110,46 @@ class MonitoringTests(unittest.TestCase):
 
     def test_real_kernel_notification_loss_can_still_request_reconciliation(self):
         self.engine._overflow(self.root)
-        self.scans.assert_called_once_with(self.root)
+        self.scans.assert_called_once_with(self.root, reason="Windows change notifications were lost")
+
+    def test_watcher_reconnection_has_a_distinct_recovery_reason(self):
+        self.engine.startup_roots.add(self.root)
+        self.engine._drive(self.root, 'online', '')
+        self.scans.assert_called_once_with(self.root, fast_startup=False,
+                                          reason='Drive or watcher reconnected')
+
+    def test_scan_diagnostics_are_local_and_excluded_from_watch_events(self):
+        import diagnostics
+        diagnostics.report(self.db, 'scan', self.root, 'started: test recovery', scan=True)
+        log = self.data/'fileburglar-scans.log'
+        self.assertIn('started: test recovery', log.read_text(encoding='utf-8'))
+        self.engine.on_events(self.root, [('changed',str(log))])
+        self.assertEqual(self.engine.inbox.qsize(),0)
+
+    def test_watcher_rearms_before_delivering_a_batch(self):
+        import watcher as module
+        reads=[];delivered=threading.Event();observed=[];errors=[]
+        original=module.k32.ReadDirectoryChangesW
+        def read(*args):
+            reads.append(1)
+            return original(*args)
+        def receive(root,batch):
+            observed.append(len(reads))
+            delivered.set()
+        ready=threading.Event()
+        with patch.object(module.k32,'ReadDirectoryChangesW',side_effect=read):
+            watcher=DriveWatcher(str(self.base)+os.sep,receive,lambda root:None,
+                                 lambda root,error:errors.append(error),lambda root:ready.set())
+            watcher.start()
+            try:
+                self.assertTrue(ready.wait(3),errors)
+                (self.watched/'notification.txt').write_text('test')
+                self.assertTrue(delivered.wait(3),errors)
+                self.assertGreaterEqual(observed[0],2)
+                self.assertFalse(errors)
+            finally:
+                watcher.stop();watcher.join(3)
+                self.assertFalse(watcher.is_alive())
 
     def test_live_windows_notifications_settle_back_to_monitoring(self):
         ready=threading.Event();errors=[]
@@ -125,6 +164,28 @@ class MonitoringTests(unittest.TestCase):
             self.wait(lambda:self.settled(1))
             time.sleep(.2)
             self.assertEqual(self.engine.snapshot()[self.root]['state'],'ready')
+            self.assertFalse(errors)
+            self.scans.assert_not_called()
+        finally:
+            watcher.stop();watcher.join(3)
+
+    def test_busy_live_notifications_do_not_start_drive_scans(self):
+        ready=threading.Event();errors=[]
+        watcher=DriveWatcher(str(self.base)+os.sep,
+                             lambda root,batch:self.engine.on_events(self.root,batch),
+                             lambda root:self.engine.on_overflow(self.root),
+                             lambda root,error:errors.append(error),lambda root:ready.set())
+        self.engine.start();watcher.start()
+        try:
+            self.assertTrue(ready.wait(3),errors)
+            for i in range(400):
+                file=self.watched/f'burst-{i}.txt'
+                file.write_text('first');file.write_text('updated')
+            deadline=time.monotonic()+20
+            while time.monotonic()<deadline and not (self.settled(400) and self.engine.snapshot()[self.root]['bytes']==2800):
+                time.sleep(.025)
+            self.assertTrue(self.settled(400),self.engine.snapshot())
+            self.assertEqual(self.engine.snapshot()[self.root]['bytes'],2800)
             self.assertFalse(errors)
             self.scans.assert_not_called()
         finally:

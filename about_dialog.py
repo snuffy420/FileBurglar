@@ -56,6 +56,32 @@ with portable.txt present. Python source: the application folder. Detailed activ
 for 30 days and daily folder summaries for 365 days. Keep your private index database out of bug reports.</p>'''
 
 
+HELP_HTML += '''
+<h3>Background controls</h3>
+<p><b>Game/work mode</b> defers heavy recovery and folder catch-up work while collecting changes.
+Options can activate it for application names you choose. Startup scans retain their fast mode.</p>
+<p>Options also contains folder exclusions, separate health-monitoring and temperature-notification
+switches, one/two-hour temperature alert resets, optional space/growth alerts, update checks,
+and reconnect-summary settings. Exclusions remove tracking coverage, not your files.</p>
+<h3>Reports and updates</h3>
+<p><b>What used my space?</b> shows net growth over the last hour, day, or week.
+Right-click report or Explorer selections to copy full paths. Export CSV saves all filtered rows
+from Folder report, Activity log, or the growth view, rather than just the displayed page.</p>
+<p>Update checks announce stable GitHub releases. Downloads and installation remain your choice.</p>
+<h3>Removing an external drive</h3>
+<p>The refresh arrow beside Explorer requests immediate drive discovery. Disconnected
+drives disappear from the top strip; their saved rows retain the last known letter.
+Verified volumes keep their index and history when their letter changes. Older entries
+without a recorded identity can be explicitly linked once using <b>Link saved drive</b>
+in a connected drive's menu/details. Original log paths remain available in tooltips.</p>
+<p>Use Windows Eject normally. File Burglar listens for removal requests and releases its own access.
+The drive tile menu/details also offer <b>Release monitoring for removal</b>, <b>Resume monitoring</b>,
+and <b>Safely eject</b> when Windows identifies an eligible removable device. Release alone does not
+mean it is safe to unplug: wait for Windows to confirm safe removal. Other applications can still
+prevent ejection. A device containing File Burglar itself or its data requires closing the app.</p>
+'''
+
+
 class AboutDialog(AppDialog):
     def __init__(self, parent=None):
         super().__init__(parent, 'About File Burglar', width=600)
@@ -109,6 +135,10 @@ class AboutDialog(AppDialog):
         self.copy_status = QLabel('')
         self.copy_status.setObjectName('subtitle')
         footer.addWidget(self.copy_status,1)
+        if parent is not None and hasattr(parent,'features'):
+            update=QPushButton('Check for updates')
+            update.clicked.connect(lambda:parent.features.check_updates(True))
+            footer.addWidget(update)
         close = QPushButton('Close')
         close.clicked.connect(self.accept)
         footer.addWidget(close)
